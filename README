@@ -1,0 +1,8 @@
+# aclrepair
+
+Copyright (c) 2023 Peter Eriksson <pen@lysator.liu.se>
+
+A tool to repair/sanitize ZFS/NFSv4 ACLs in directory trees.
+
+This release builds and works on FreeBSD
+
