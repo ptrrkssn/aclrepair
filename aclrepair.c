@@ -51,6 +51,7 @@ char *version = "0.2";
 
 int f_update = 1;
 int f_verbose = 0;
+int f_ignore = 0;
 int f_user = 0;
 int f_group = 0;
 int f_everyone = 0;
@@ -84,25 +85,30 @@ int n_warn = 0;
 int
 acl_merge(acl_t a) {
     int i, j, k;
+    int rc = 0;
 
-
+    
     for (i = 0; i < a->ats_acl.acl_cnt; i++) {
 	acl_entry_t ea;
 	acl_tag_t ta;
 	acl_permset_t pa;
 	acl_flagset_t fa;
 	acl_entry_type_t eta;
-	uid_t *uap;
-	gid_t *gap;
+	uid_t ua, *uap;
+	gid_t ga, *gap;
 	
 	ea = &a->ats_acl.acl_entry[i];
 	acl_get_tag_type(ea, &ta);
 	switch (ta) {
 	case ACL_USER:
 	    uap = (uid_t *) acl_get_qualifier(ea);
+	    ua = *uap;
+	    acl_free(uap);
 	    break;
 	case ACL_GROUP:
 	    gap = (gid_t *) acl_get_qualifier(ea);
+	    ga = *gap;
+	    acl_free(gap);
 	    break;
 	}
 	acl_get_flagset_np(ea, &fa);
@@ -116,8 +122,8 @@ acl_merge(acl_t a) {
 	    acl_tag_t tb;
 	    acl_permset_t pb;
 	    acl_flagset_t fb;
-	    uid_t *ubp;
-	    gid_t *gbp;
+	    uid_t ub, *ubp;
+	    gid_t gb, *gbp;
 	    
 	    eb = &a->ats_acl.acl_entry[j];
 	    acl_get_tag_type(eb, &tb);
@@ -127,12 +133,16 @@ acl_merge(acl_t a) {
 	    switch (tb) {
 	    case ACL_USER:
 		ubp = (uid_t *) acl_get_qualifier(eb);
-		if (*uap != *ubp)
+		ub = *ubp;
+		acl_free(ubp);
+		if (ua != ub)
 		    continue;
 		break;
 	    case ACL_GROUP:
 		gbp = (gid_t *) acl_get_qualifier(eb);
-		if (*gap != *gbp)
+		gb = *gbp;
+		acl_free(gbp);
+		if (ga != gb)
 		    continue;
 		break;
 	    }
@@ -151,10 +161,11 @@ acl_merge(acl_t a) {
 	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
 		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
 	    a->ats_acl.acl_cnt--;
+	    rc++;
 	}
     }
 
-    return a->ats_acl.acl_cnt;
+    return rc;
 }
 
 
@@ -511,11 +522,29 @@ walker(const char *path,
     int acl_modified = 0;
     
 
+    switch (flags) {
+    case FTW_DNR:
+	if (f_ignore)
+	    return 0;
+
+	fprintf(stderr, "%s: Error: %s: Unable to descend into directory\n",
+		argv0, path);
+	exit(1);
+	
+    case FTW_NS:
+	if (f_ignore)
+	    return 0;
+	fprintf(stderr, "%s: Error: %s: Unreadable file attributes\n",
+		argv0, path);
+	exit(1);
+    }
+    
     ++n_file;
     if (f_verbose > 1) {
 	if (f_verbose > 2)
-	    printf("%s [base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
+	    printf("%s [flags=%d, base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
 		   path,
+		   flags,
 		   fp->base, fp->level,
 		   sp->st_size, sp->st_uid, sp->st_gid);
 	else
@@ -560,7 +589,7 @@ walker(const char *path,
 
     na = a = acl_get_link_np(path, ACL_TYPE_NFS4);
     if (!a)
-	return 0;
+	return -1;
 
     if (f_propagate) {
 	/* Propagate ACL inheritance down the tree */
@@ -807,6 +836,10 @@ main(int argc,
 		f_verbose++;
 		break;
 
+	    case 'i':
+		f_ignore++;
+		break;
+
 	    case 'r':
 		f_recurse++;
 		break;
@@ -888,6 +921,7 @@ main(int argc,
 		puts("Options:");
 		puts("  -h                Display this information");
 		puts("  -v                Be more verbose");
+		puts("  -i                Ignore non-fatal errors");
 		puts("  -n                No-update mode");
 		puts("  -r                Recurse into subdirectories");
 		puts("  -s                Sort ACL");
