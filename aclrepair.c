@@ -47,7 +47,7 @@
 #define _ACL_PRIVATE 1
 #include <sys/acl.h>
 
-char *version = "0.1";
+char *version = "0.2";
 
 int f_update = 1;
 int f_verbose = 0;
@@ -57,6 +57,7 @@ int f_everyone = 0;
 int f_propagate = 0;
 int f_cleanup = 0;     /* Strip ACL of stale (numeric) user & group entries */
 int f_sort = 0;
+int f_merge = 0;
 int f_recurse = 0;
 
 uid_t ouid = -1;
@@ -79,149 +80,82 @@ int n_warn = 0;
 
 
 
+/* &nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt */
 int
-fix_acl(acl_t a,
-	const char *path,
-	uid_t fuid,
-	gid_t fgid) {
-    acl_entry_t aep;
-    int eid;
-    int acl_modified = 0;
-    int have_everyone = 0;
-    uid_t *uidp;
-    gid_t *gidp;
-    
+acl_merge(acl_t a) {
+    int i, j, k;
 
-    eid = ACL_FIRST_ENTRY;
-    while (acl_get_entry(a, eid, &aep) > 0) {
-	acl_tag_t tt;
-    
-	eid = ACL_NEXT_ENTRY;
-    
-	if (acl_get_tag_type(aep, &tt) < 0) {
-	    fprintf(stderr, "%s: Error: acl_get_tag_type: %s\n",
-		    argv0, strerror(errno));
-	    exit(1);
-	}
 
-	switch (tt) {
-	case ACL_EVERYONE:
-	    have_everyone++;
-	    break;
-      
-	case ACL_USER_OBJ:
-	    if (fuid != -1) {
-		/* Change user@ to a user: ACL entry */
-		acl_set_tag_type(aep, ACL_USER);
-		acl_set_qualifier(aep, (const void *) &fuid);
+    for (i = 0; i < a->ats_acl.acl_cnt; i++) {
+	acl_entry_t ea;
+	acl_tag_t ta;
+	acl_permset_t pa;
+	acl_flagset_t fa;
+	acl_entry_type_t eta;
+	uid_t *uap;
+	gid_t *gap;
 	
-		acl_modified++;
-		if (f_verbose > 1)
-		    printf("%s: owner@ -> user:%d: ACL Entry updated\n", path, fuid);
-	    }
-	    break;
-      
-	case ACL_GROUP_OBJ:
-	    if (fgid != -1) {
-		/* Change group@ to a group: ACL entry */
-		acl_set_tag_type(aep, ACL_GROUP);
-		acl_set_qualifier(aep, (const void *) &fgid);
-	
-		acl_modified++;
-		if (f_verbose > 1)
-		    printf("%s: group@ -> group:%u: ACL Entry updated\n", path, fgid);
-	    }
-	    break;
-      
+	ea = &a->ats_acl.acl_entry[i];
+	acl_get_tag_type(ea, &ta);
+	switch (ta) {
 	case ACL_USER:
-	    uidp = (uid_t *) acl_get_qualifier(aep);
-      
-	    if (*uidp == ouid) {
-		if (acl_set_qualifier(aep, (void *) &fuid) < 0) {
-		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
-			    argv0, path, ouid, fuid, strerror(errno));
-		    exit(1);
-		}
-	
-		acl_modified = 1;
-		if (f_verbose > 1)
-		    printf("%s: user:%u -> user:%u: ACL Entry updated\n", path, ouid, fuid);
-	    } else if (f_cleanup) {
-		struct passwd *pp = getpwuid(*uidp);
-	
-		if (!pp) {
-		    if (acl_delete_entry(a, aep) < 0) {
-			fprintf(stderr, "%s: Error: %s: acl_delete_entry(user:%d): %s\n",
-				argv0, path, *uidp, strerror(errno));
-			exit(1);
-		    } else {
-			if (f_verbose > 1)
-			    printf("%s: user:%u: ACL Entry Deleted [stale]\n", path, *uidp);
-		    }
-		}
-	    }
-	    acl_free(uidp);
+	    uap = (uid_t *) acl_get_qualifier(ea);
 	    break;
-
 	case ACL_GROUP:
-	    gidp = (gid_t *) acl_get_qualifier(aep);
-
-	    if (*gidp == ogid) {
-		if (acl_set_qualifier(aep, (void *) &fgid) < 0) {
-		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
-			    argv0, path, ogid, fgid, strerror(errno));
-		    exit(1);
-		}
-	
-		acl_modified = 1;
-		if (f_verbose > 1)
-		    printf("%s: group:%d -> group:%d: ACL Entry updated\n", path, ogid, fgid);
-	    } else if (f_cleanup) {
-		struct group *gp = getgrgid(*gidp);
-	
-		if (!gp) {
-		    if (acl_delete_entry(a, aep) < 0) {
-			fprintf(stderr, "%s: Error: %s: acl_delete_entry(group:%d): %s\n",
-				argv0, path, *gidp, strerror(errno));
-			exit(1);
-		    }
-	  
-		    acl_modified = 1;
-		    if (f_verbose > 1)
-			printf("%s: group:%d: ACL Entry Deleted [stale]\n", path, *gidp);
-		}
-	    }
+	    gap = (gid_t *) acl_get_qualifier(ea);
 	    break;
 	}
+	acl_get_flagset_np(ea, &fa);
+	acl_get_entry_type_np(ea, &eta);
+	acl_get_permset(ea, &pa);
+
+	/* Look for duplicate entries */
+	for (j = i+1; j < a->ats_acl.acl_cnt; j++) {
+	    acl_entry_t eb;
+	    acl_entry_type_t etb;
+	    acl_tag_t tb;
+	    acl_permset_t pb;
+	    acl_flagset_t fb;
+	    uid_t *ubp;
+	    gid_t *gbp;
+	    
+	    eb = &a->ats_acl.acl_entry[j];
+	    acl_get_tag_type(eb, &tb);
+	    if (tb != ta)
+		continue;
+	    
+	    switch (tb) {
+	    case ACL_USER:
+		ubp = (uid_t *) acl_get_qualifier(eb);
+		if (*uap != *ubp)
+		    continue;
+		break;
+	    case ACL_GROUP:
+		gbp = (gid_t *) acl_get_qualifier(eb);
+		if (*gap != *gbp)
+		    continue;
+		break;
+	    }
+	    acl_get_entry_type_np(eb, &etb);
+	    if (etb != eta)
+		continue;
+
+	    acl_get_flagset_np(eb, &fb);
+	    if (*fa != *fb)
+		continue;
+	    
+	    /* Same entry tag type, flags & type (allow/deny) */
+	    acl_get_permset(eb, &pb);
+	    *pa |= *pb;
+
+	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
+		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
+	    a->ats_acl.acl_cnt--;
+	}
     }
-  
-    if (f_everyone && !have_everyone) {
-	acl_permset_t perms;
-	acl_flagset_t flags;
 
-	
-	acl_create_entry(&a, &aep);
-	acl_set_tag_type(aep, ACL_EVERYONE);
-    
-	acl_get_permset(aep, &perms);
-	acl_clear_perms(perms);
-	acl_set_permset(aep, perms);
-
-	acl_get_flagset_np(aep, &flags);
-	acl_clear_flags_np(flags);
-	acl_set_flagset_np(aep, flags);
-    
-	acl_set_entry_type_np(aep, ACL_ENTRY_TYPE_ALLOW);
-    
-	acl_modified = 1;
-	if (f_verbose > 1)
-	    printf("%s: everyone@:::allow: ACL Entry added\n", path);
-    }
-
-    return acl_modified;
+    return a->ats_acl.acl_cnt;
 }
-
-
 
 
 /* Compare two ACL Entries */
@@ -423,6 +357,150 @@ acl_equal(acl_t aa,
 
 
 int
+fix_acl(acl_t a,
+	const char *path,
+	uid_t fuid,
+	gid_t fgid) {
+    acl_entry_t aep;
+    int eid;
+    int acl_modified = 0;
+    int have_everyone = 0;
+    uid_t *uidp;
+    gid_t *gidp;
+    
+
+    eid = ACL_FIRST_ENTRY;
+    while (acl_get_entry(a, eid, &aep) > 0) {
+	acl_tag_t tt;
+    
+	eid = ACL_NEXT_ENTRY;
+    
+	if (acl_get_tag_type(aep, &tt) < 0) {
+	    fprintf(stderr, "%s: Error: acl_get_tag_type: %s\n",
+		    argv0, strerror(errno));
+	    exit(1);
+	}
+
+	switch (tt) {
+	case ACL_EVERYONE:
+	    have_everyone++;
+	    break;
+      
+	case ACL_USER_OBJ:
+	    if (fuid != -1) {
+		/* Change user@ to a user: ACL entry */
+		acl_set_tag_type(aep, ACL_USER);
+		acl_set_qualifier(aep, (const void *) &fuid);
+	
+		acl_modified++;
+		if (f_verbose > 1)
+		    printf("%s: owner@ -> user:%d: ACL Entry updated\n", path, fuid);
+	    }
+	    break;
+      
+	case ACL_GROUP_OBJ:
+	    if (fgid != -1) {
+		/* Change group@ to a group: ACL entry */
+		acl_set_tag_type(aep, ACL_GROUP);
+		acl_set_qualifier(aep, (const void *) &fgid);
+	
+		acl_modified++;
+		if (f_verbose > 1)
+		    printf("%s: group@ -> group:%u: ACL Entry updated\n", path, fgid);
+	    }
+	    break;
+      
+	case ACL_USER:
+	    uidp = (uid_t *) acl_get_qualifier(aep);
+      
+	    if (*uidp == ouid) {
+		if (acl_set_qualifier(aep, (void *) &fuid) < 0) {
+		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
+			    argv0, path, ouid, fuid, strerror(errno));
+		    exit(1);
+		}
+	
+		acl_modified = 1;
+		if (f_verbose > 1)
+		    printf("%s: user:%u -> user:%u: ACL Entry updated\n", path, ouid, fuid);
+	    } else if (f_cleanup) {
+		struct passwd *pp = getpwuid(*uidp);
+	
+		if (!pp) {
+		    if (acl_delete_entry(a, aep) < 0) {
+			fprintf(stderr, "%s: Error: %s: acl_delete_entry(user:%d): %s\n",
+				argv0, path, *uidp, strerror(errno));
+			exit(1);
+		    } else {
+			if (f_verbose > 1)
+			    printf("%s: user:%u: ACL Entry Deleted [stale]\n", path, *uidp);
+		    }
+		}
+	    }
+	    acl_free(uidp);
+	    break;
+
+	case ACL_GROUP:
+	    gidp = (gid_t *) acl_get_qualifier(aep);
+
+	    if (*gidp == ogid) {
+		if (acl_set_qualifier(aep, (void *) &fgid) < 0) {
+		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
+			    argv0, path, ogid, fgid, strerror(errno));
+		    exit(1);
+		}
+	
+		acl_modified = 1;
+		if (f_verbose > 1)
+		    printf("%s: group:%d -> group:%d: ACL Entry updated\n", path, ogid, fgid);
+	    } else if (f_cleanup) {
+		struct group *gp = getgrgid(*gidp);
+	
+		if (!gp) {
+		    if (acl_delete_entry(a, aep) < 0) {
+			fprintf(stderr, "%s: Error: %s: acl_delete_entry(group:%d): %s\n",
+				argv0, path, *gidp, strerror(errno));
+			exit(1);
+		    }
+	  
+		    acl_modified = 1;
+		    if (f_verbose > 1)
+			printf("%s: group:%d: ACL Entry Deleted [stale]\n", path, *gidp);
+		}
+	    }
+	    break;
+	}
+    }
+  
+    if (f_everyone && !have_everyone) {
+	acl_permset_t perms;
+	acl_flagset_t flags;
+
+	
+	acl_create_entry(&a, &aep);
+	acl_set_tag_type(aep, ACL_EVERYONE);
+    
+	acl_get_permset(aep, &perms);
+	acl_clear_perms(perms);
+	acl_set_permset(aep, perms);
+
+	acl_get_flagset_np(aep, &flags);
+	acl_clear_flags_np(flags);
+	acl_set_flagset_np(aep, flags);
+    
+	acl_set_entry_type_np(aep, ACL_ENTRY_TYPE_ALLOW);
+    
+	acl_modified = 1;
+	if (f_verbose > 1)
+	    printf("%s: everyone@:::allow: ACL Entry added\n", path);
+    }
+
+    return acl_modified;
+}
+
+
+
+int
 walker(const char *path,
        const struct stat *sp,
        int flags,
@@ -494,6 +572,15 @@ walker(const char *path,
 
 
 	    acl_modified = fix_acl(a, path, f_user ? fuid : -1, f_group ? fgid : -1);
+
+	    if (f_merge) {
+		if (acl_merge(a) > 0) {
+		    if (f_verbose > 1)
+			printf("%s: ACL Merged\n", path);
+		    acl_modified = 1;
+		}
+	    }
+	    
 	    if (f_sort) {
 		na = acl_sort(a);
 		if (acl_equal(a, na) == 0) {
@@ -570,6 +657,14 @@ walker(const char *path,
 	/* No ACL inheritance propagation */
 	acl_modified = fix_acl(a, path, f_user ? fuid : -1, f_group ? fgid : -1);
 
+	if (f_merge) {
+	    if (acl_merge(a) > 0) {
+		if (f_verbose > 1)
+		    printf("%s: ACL Merged\n", path);
+		acl_modified = 1;
+	    }
+	}
+	
 	if (f_sort) {
 	    na = acl_sort(a);
 	    if (acl_equal(a, na) == 0) {
@@ -686,8 +781,28 @@ main(int argc,
 
     argv0 = argv[0];
     for (i = 1; i < argc && argv[i][0] == '-'; i++) {
+	if (argv[i][1] == '\0' || (argv[i][1] == '-' && argv[i][2] == '\0')) {
+	    ++i;
+	    goto LastArg;
+	}
+
+	
 	for (j = 1; argv[i][j]; j++) {
-	    switch (argv[i][j]) {
+	    char *vp = NULL;
+	    int c = argv[i][j];
+
+	Again:
+	    switch (c) {
+	    case '-':
+		vp = strchr(argv[i]+j+1, '=');
+		if (vp)
+		    *vp++ = '\0';
+		if (strcmp(argv[i]+j+1, "help") == 0) {
+		    c = 'h';
+		    goto Again;
+		}
+		break;
+		
 	    case 'v':
 		f_verbose++;
 		break;
@@ -714,6 +829,10 @@ main(int argc,
 	
 	    case 's':
 		f_sort++;
+		break;
+	
+	    case 'm':
+		f_merge++;
 		break;
 	
 	    case 'e':
@@ -770,9 +889,11 @@ main(int argc,
 		puts("  -h                Display this information");
 		puts("  -v                Be more verbose");
 		puts("  -n                No-update mode");
-		puts("  -r                Recurse");
-		puts("  -u                Convert owner@ to user:");
-		puts("  -g                Convert group@ to group:");
+		puts("  -r                Recurse into subdirectories");
+		puts("  -s                Sort ACL");
+		puts("  -m                Merge redundant ACL entries");
+		puts("  -u                Convert owner@ to user: entries");
+		puts("  -g                Convert group@ to group: entries");
 		puts("  -p                Propagate ACL inheritance");
 		puts("  -c                Cleanup stale (numeric) user & group ACL entries");
 		puts("  -e                Make sure special everyone@ entries exist");
@@ -788,7 +909,8 @@ main(int argc,
 	}
     NextArg:;
     }
-      
+ LastArg:
+    
     if (f_verbose)
 	printf("[aclrepair, v%s - Copyright (c) 2023 Peter Eriksson <pen@lysator.liu.se>]\n",
 	       version);
