@@ -61,11 +61,8 @@ int f_sort = 0;
 int f_merge = 0;
 int f_recurse = 0;
 
-uid_t ouid = -1;
-uid_t nuid = -1;
-
-gid_t ogid = -1;
-gid_t ngid = -1;
+int f_adopt_stale_user_owner = 0;
+int f_adopt_stale_group_owner = 0;
 
 
 acl_t saved_dir_acl = NULL;
@@ -78,6 +75,168 @@ int n_chgrp = 0;
 int n_chacl = 0;
 int n_file = 0;
 int n_warn = 0;
+
+
+struct uidmap {
+    uid_t old;
+    uid_t new;
+    struct uidmap *next;
+} *uidmap = NULL;
+
+struct gidmap {
+    gid_t old;
+    gid_t new;
+    struct gidmap *next;
+} *gidmap = NULL;
+
+
+int
+uidmap_lookup(uid_t ou,
+	      uid_t *nu) {
+    struct uidmap *ump;
+    
+    for (ump = uidmap; ump && ump->old != ou; ump = ump->next)
+	;
+    if (ump) {
+	*nu = ump->new;
+	return 1;
+    }
+
+    return 0;
+}
+
+
+int
+gidmap_lookup(gid_t og,
+	      gid_t *ng) {
+    struct gidmap *gmp;
+    
+    for (gmp = gidmap; gmp && gmp->old != og; gmp = gmp->next)
+	;
+    if (gmp) {
+	*ng = gmp->new;
+	return 1;
+    }
+
+    return 0;
+}
+
+int
+get_user_mapping(char *sp,
+		 uid_t *ouidp,
+		 uid_t *nuidp) {
+    struct passwd *pp;
+    char *dp = strchr(sp, ':');
+
+  
+    if (dp)
+	*dp++ = '\0';
+    else {
+	dp = sp;
+	sp = NULL;
+	*ouidp = -1;
+    }
+
+    if (sp) {
+	pp = getpwnam(sp);
+	if (pp)
+	    *ouidp = pp->pw_uid;
+	else if (sscanf(sp, "%d", ouidp) != 1)
+	    return -1;
+    }
+  
+    pp = getpwnam(dp);
+    if (pp)
+	*nuidp = pp->pw_uid;
+    else if (sscanf(dp, "%d", nuidp) != 1)
+	return -2;
+  
+    return 0;
+}
+
+
+
+int
+get_group_mapping(char *sp,
+		  gid_t *ogidp,
+		  gid_t *ngidp) {
+    struct group *gp;
+    char *dp = strchr(sp, ':');
+
+  
+    if (dp)
+	*dp++ = '\0';
+    else {
+	dp = sp;
+	sp = NULL;
+	*ogidp = -1;
+    }
+
+    if (sp) {
+	gp = getgrnam(sp);
+	if (gp)
+	    *ogidp = gp->gr_gid;
+	else if (sscanf(sp, "%d", ogidp) != 1)
+	    return -1;
+    }
+  
+    gp = getgrnam(dp);
+    if (gp)
+	*ngidp = gp->gr_gid;
+    else if (sscanf(dp, "%d", ngidp) != 1)
+	return -2;
+  
+    return 0;
+}
+
+
+int
+uidmap_add(char *s) {
+    struct uidmap *ump;
+    int rc;
+    
+    ump = malloc(sizeof(*ump));
+    if (!ump)
+	return -1;
+    
+    rc = get_user_mapping(s, &ump->old, &ump->new);
+    if (rc < 0) {
+	free(ump);
+	return rc;
+    }
+
+    if (ump->old == -1)
+	f_adopt_stale_user_owner = 1;
+    
+    ump->next = uidmap;
+    uidmap = ump;
+    return 0;
+}
+
+int
+gidmap_add(char *s) {
+    struct gidmap *gmp;
+    int rc;
+    
+    gmp = malloc(sizeof(*gmp));
+    if (!gmp)
+	return -1;
+    
+    rc = get_group_mapping(s, &gmp->old, &gmp->new);
+    if (rc < 0) {
+	free(gmp);
+	return rc;
+    }
+
+    if (gmp->old == -1)
+	f_adopt_stale_group_owner = 1;
+    
+    gmp->next = gidmap;
+    gidmap = gmp;
+    return 0;
+}
+
+
 
 
 
@@ -370,14 +529,16 @@ acl_equal(acl_t aa,
 int
 fix_acl(acl_t a,
 	const char *path,
-	uid_t fuid,
-	gid_t fgid) {
+	const struct stat *sp) {
     acl_entry_t aep;
     int eid;
     int acl_modified = 0;
     int have_everyone = 0;
-    uid_t *uidp;
-    gid_t *gidp;
+    uid_t *uidp, fuid;
+    gid_t *gidp, fgid;
+    struct passwd *pp;
+    struct group *gp;
+		
     
 
     eid = ACL_FIRST_ENTRY;
@@ -398,11 +559,12 @@ fix_acl(acl_t a,
 	    break;
       
 	case ACL_USER_OBJ:
-	    if (fuid != -1) {
+	    if (f_user) {
 		/* Change user@ to a user: ACL entry */
 		acl_set_tag_type(aep, ACL_USER);
+		fuid = sp->st_uid;
+		uidmap_lookup(sp->st_uid, &fuid);
 		acl_set_qualifier(aep, (const void *) &fuid);
-	
 		acl_modified++;
 		if (f_verbose > 1)
 		    printf("%s: owner@ -> user:%d: ACL Entry updated\n", path, fuid);
@@ -410,11 +572,12 @@ fix_acl(acl_t a,
 	    break;
       
 	case ACL_GROUP_OBJ:
-	    if (fgid != -1) {
+	    if (f_group) {
 		/* Change group@ to a group: ACL entry */
 		acl_set_tag_type(aep, ACL_GROUP);
+		fgid = sp->st_gid;
+		gidmap_lookup(sp->st_uid, &fgid);
 		acl_set_qualifier(aep, (const void *) &fgid);
-	
 		acl_modified++;
 		if (f_verbose > 1)
 		    printf("%s: group@ -> group:%u: ACL Entry updated\n", path, fgid);
@@ -423,29 +586,36 @@ fix_acl(acl_t a,
       
 	case ACL_USER:
 	    uidp = (uid_t *) acl_get_qualifier(aep);
-      
-	    if (*uidp == ouid) {
+	    if (!uidp) {
+		fprintf(stderr, "%s: Error: Unable to get user: qualifier: %s\n",
+			argv0, strerror(errno));
+		exit(1);
+	    }
+
+	    if (f_cleanup || f_adopt_stale_user_owner)
+		pp = getpwuid(*uidp);
+	    else
+		pp = NULL;
+	    
+	    if (uidmap_lookup(*uidp, &fuid) == 1 ||
+		(f_adopt_stale_user_owner && !pp && uidmap_lookup(-1, &fuid) == 1)) {
 		if (acl_set_qualifier(aep, (void *) &fuid) < 0) {
 		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
-			    argv0, path, ouid, fuid, strerror(errno));
+			    argv0, path, *uidp, fuid, strerror(errno));
 		    exit(1);
 		}
 	
 		acl_modified = 1;
 		if (f_verbose > 1)
-		    printf("%s: user:%u -> user:%u: ACL Entry updated\n", path, ouid, fuid);
-	    } else if (f_cleanup) {
-		struct passwd *pp = getpwuid(*uidp);
-	
-		if (!pp) {
-		    if (acl_delete_entry(a, aep) < 0) {
-			fprintf(stderr, "%s: Error: %s: acl_delete_entry(user:%d): %s\n",
-				argv0, path, *uidp, strerror(errno));
-			exit(1);
-		    } else {
-			if (f_verbose > 1)
-			    printf("%s: user:%u: ACL Entry Deleted [stale]\n", path, *uidp);
-		    }
+		    printf("%s: user:%u -> user:%u: ACL Entry updated\n", path, *uidp, fuid);
+	    } else if (f_cleanup && !pp) {
+		if (acl_delete_entry(a, aep) < 0) {
+		    fprintf(stderr, "%s: Error: %s: acl_delete_entry(user:%d): %s\n",
+			    argv0, path, *uidp, strerror(errno));
+		    exit(1);
+		} else {
+		    if (f_verbose > 1)
+			printf("%s: user:%u: ACL Entry Deleted [stale]\n", path, *uidp);
 		}
 	    }
 	    acl_free(uidp);
@@ -453,32 +623,40 @@ fix_acl(acl_t a,
 
 	case ACL_GROUP:
 	    gidp = (gid_t *) acl_get_qualifier(aep);
-
-	    if (*gidp == ogid) {
+	    if (!gidp) {
+		fprintf(stderr, "%s: Error: Unable to get group: qualifier: %s\n",
+			argv0, strerror(errno));
+		exit(1);
+	    }
+		
+	    if (f_cleanup || f_adopt_stale_group_owner)
+		gp = getgrgid(*gidp);
+	    else
+		gp = NULL;
+	    
+	    if (gidmap_lookup(*gidp, &fgid) == 1 ||
+		(f_adopt_stale_group_owner && !gp && gidmap_lookup(-1, &fgid) == 1)) {
 		if (acl_set_qualifier(aep, (void *) &fgid) < 0) {
 		    fprintf(stderr, "%s: Error: %s: acl_set_qualifier(%d -> %d): %s\n",
-			    argv0, path, ogid, fgid, strerror(errno));
+			    argv0, path, *gidp, fgid, strerror(errno));
 		    exit(1);
 		}
-	
+		
 		acl_modified = 1;
 		if (f_verbose > 1)
-		    printf("%s: group:%d -> group:%d: ACL Entry updated\n", path, ogid, fgid);
+		    printf("%s: group:%d -> group:%d: ACL Entry updated\n", path, *gidp, fgid);
 	    } else if (f_cleanup) {
-		struct group *gp = getgrgid(*gidp);
-	
-		if (!gp) {
-		    if (acl_delete_entry(a, aep) < 0) {
-			fprintf(stderr, "%s: Error: %s: acl_delete_entry(group:%d): %s\n",
-				argv0, path, *gidp, strerror(errno));
-			exit(1);
-		    }
-	  
-		    acl_modified = 1;
-		    if (f_verbose > 1)
-			printf("%s: group:%d: ACL Entry Deleted [stale]\n", path, *gidp);
+		if (acl_delete_entry(a, aep) < 0) {
+		    fprintf(stderr, "%s: Error: %s: acl_delete_entry(group:%d): %s\n",
+			    argv0, path, *gidp, strerror(errno));
+		    exit(1);
 		}
+		
+		acl_modified = 1;
+		if (f_verbose > 1)
+		    printf("%s: group:%d: ACL Entry Deleted [stale]\n", path, *gidp);
 	    }
+	    acl_free(gidp);
 	    break;
 	}
     }
@@ -516,8 +694,8 @@ walker(const char *path,
        const struct stat *sp,
        int flags,
        struct FTW *fp) {
-    uid_t fuid;
-    gid_t fgid;
+    uid_t fuid = -1;
+    gid_t fgid = -1;
     acl_t a = NULL, na = NULL;
     int acl_modified = 0;
     
@@ -540,8 +718,8 @@ walker(const char *path,
     }
     
     ++n_file;
-    if (f_verbose > 1) {
-	if (f_verbose > 2)
+    if (f_verbose > 2) {
+	if (f_verbose > 3)
 	    printf("%s [flags=%d, base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
 		   path,
 		   flags,
@@ -551,40 +729,38 @@ walker(const char *path,
 	    printf("%s\n", path);
     }
 
-    fuid = sp->st_uid;
-    if (sp->st_uid == ouid) {
+    if (uidmap_lookup(sp->st_uid, &fuid) == 1 ||
+	(f_adopt_stale_user_owner && getpwuid(sp->st_uid) == NULL && uidmap_lookup(-1, &fuid) == 1)) {
 	n_chuid++;
 	if (f_update) {
-	    if (lchown(path, nuid, -1) < 0) {
+	    if (lchown(path, fuid, -1) < 0) {
 		fprintf(stderr, "%s: Error: %s: chown(uid=%d): %s\n",
-			argv0, path, nuid, strerror(errno));
+			argv0, path, fuid, strerror(errno));
 		exit(1);
 	    }
 	    if (f_verbose)
-		printf("%s: Owner Updated\n", path);
+		printf("%s: User Owner Updated\n", path);
 	} else {
 	    if (f_verbose)
-		printf("%s: Owner (NOT) Updated\n", path);
+		printf("%s: User Owner (NOT) Updated\n", path);
 	}
-	fuid = nuid;
     }
-  
-    fgid = sp->st_gid;
-    if (sp->st_gid == ogid) {
+
+    if (gidmap_lookup(sp->st_gid, &fgid) == 1 ||
+	(f_adopt_stale_group_owner && getgrgid(sp->st_gid) == NULL && gidmap_lookup(-1, &fgid) == 1)) {
 	n_chgrp++;
 	if (f_update) {
-	    if (lchown(path, -1, ngid) < 0) {
+	    if (lchown(path, -1, fgid) < 0) {
 		fprintf(stderr, "%s: Error: %s: chown(gid=%d): %s\n",
-			argv0, path, ngid, strerror(errno));
+			argv0, path, fgid, strerror(errno));
 		exit(1);
 	    }
 	    if (f_verbose)
-		printf("%s: Group Updated\n", path);
+		printf("%s: Group Owner Updated\n", path);
 	} else {
 	    if (f_verbose)
-		printf("%s: Group (NOT) Updated\n", path);
+		printf("%s: Group Owner (NOT) Updated\n", path);
 	}
-	fgid = ngid;
     }
 
     na = a = acl_get_link_np(path, ACL_TYPE_NFS4);
@@ -600,7 +776,7 @@ walker(const char *path,
 	    int eid;
 
 
-	    acl_modified = fix_acl(a, path, f_user ? fuid : -1, f_group ? fgid : -1);
+	    acl_modified = fix_acl(a, path, sp);
 
 	    if (f_merge) {
 		if (acl_merge(a) > 0) {
@@ -684,7 +860,7 @@ walker(const char *path,
 	}
     } else {
 	/* No ACL inheritance propagation */
-	acl_modified = fix_acl(a, path, f_user ? fuid : -1, f_group ? fgid : -1);
+	acl_modified = fix_acl(a, path, sp);
 
 	if (f_merge) {
 	    if (acl_merge(a) > 0) {
@@ -729,75 +905,6 @@ walker(const char *path,
 
 
 
-
-
-int
-get_user_mapping(char *sp,
-		 uid_t *ouidp,
-		 uid_t *nuidp) {
-    struct passwd *pp;
-    char *dp = strchr(sp, ':');
-
-  
-    if (dp)
-	*dp++ = '\0';
-    else {
-	dp = sp;
-	sp = NULL;
-	*ouidp = -1;
-    }
-
-    if (sp) {
-	pp = getpwnam(sp);
-	if (pp)
-	    *ouidp = pp->pw_uid;
-	else if (sscanf(sp, "%d", ouidp) != 1)
-	    return -1;
-    }
-  
-    pp = getpwnam(dp);
-    if (pp)
-	*nuidp = pp->pw_uid;
-    else if (sscanf(sp, "%d", nuidp) != 1)
-	return -2;
-  
-    return 0;
-}
-
-
-
-int
-get_group_mapping(char *sp,
-		  gid_t *ogidp,
-		  gid_t *ngidp) {
-    struct group *gp;
-    char *dp = strchr(sp, ':');
-
-  
-    if (dp)
-	*dp++ = '\0';
-    else {
-	dp = sp;
-	sp = NULL;
-	*ogidp = -1;
-    }
-
-    if (sp) {
-	gp = getgrnam(sp);
-	if (gp)
-	    *ogidp = gp->gr_gid;
-	else if (sscanf(sp, "%d", ogidp) != 1)
-	    return -1;
-    }
-  
-    gp = getgrnam(dp);
-    if (gp)
-	*ngidp = gp->gr_gid;
-    else if (sscanf(sp, "%d", ngidp) != 1)
-	return -2;
-  
-    return 0;
-}
 
 
 
@@ -879,10 +986,10 @@ main(int argc,
 	    case 'U':
 		if (argv[i][j+1]) {
 		    ++j;
-		    rc = get_user_mapping(argv[i]+j, &ouid, &nuid);
+		    rc = uidmap_add(argv[i]+j);
 		} else if (i+1 < argc) {
 		    j = 0;
-		    rc = get_user_mapping(argv[++i], &ouid, &nuid);
+		    rc = uidmap_add(argv[++i]);
 		}
 		switch (rc) {
 		case -1:
@@ -899,10 +1006,10 @@ main(int argc,
 	    case 'G':
 		if (argv[i][j+1]) {
 		    ++j;
-		    rc = get_group_mapping(argv[i]+j, &ogid, &ngid);
+		    rc = gidmap_add(argv[i]+j);
 		} else if (i+1 < argc) {
 		    j = 0;
-		    rc = get_group_mapping(argv[++i], &ogid, &ngid);
+		    rc = gidmap_add(argv[++i]);
 		}
 		switch (rc) {
 		case -1:
@@ -924,7 +1031,7 @@ main(int argc,
 		puts("  -i                Ignore non-fatal errors");
 		puts("  -n                No-update mode");
 		puts("  -r                Recurse into subdirectories");
-		puts("  -s                Sort ACL");
+		puts("  -s                Sort ACL entries");
 		puts("  -m                Merge redundant ACL entries");
 		puts("  -u                Convert owner@ to user: entries");
 		puts("  -g                Convert group@ to group: entries");
