@@ -688,6 +688,22 @@ fix_acl(acl_t a,
 }
 
 
+void
+spin(void) {
+    const char dials[] = "|/-\\";
+    static time_t last;
+    time_t now;
+
+    if (isatty(1)) {
+	time(&now);
+	if (now != last) {
+	    last = now;
+	    putc(dials[now%sizeof(dials)-1], stdout);
+	    putc('\b', stdout);
+	    fflush(stdout);
+	}
+    }
+}
 
 int
 walker(const char *path,
@@ -727,7 +743,8 @@ walker(const char *path,
 		   sp->st_size, sp->st_uid, sp->st_gid);
 	else
 	    printf("%s\n", path);
-    }
+    } else
+	spin();
 
     if (uidmap_lookup(sp->st_uid, &fuid) == 1 ||
 	(f_adopt_stale_user_owner && getpwuid(sp->st_uid) == NULL && uidmap_lookup(-1, &fuid) == 1)) {
