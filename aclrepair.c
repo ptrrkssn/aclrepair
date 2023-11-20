@@ -44,18 +44,22 @@
 #include <pwd.h>
 #include <grp.h>
 
+/* Needed to get access to the internal structure of acl_t in FreeBSD */
 #define _ACL_PRIVATE 1
 #include <sys/acl.h>
 
-char *version = "0.2";
+
+char *version = "0.3";
 
 int f_update = 1;
 int f_verbose = 0;
+int f_debug = 0;
 int f_ignore = 0;
 int f_user = 0;
 int f_group = 0;
 int f_everyone = 0;
 int f_propagate = 0;
+int f_zero = 0;
 int f_cleanup = 0;     /* Strip ACL of stale (numeric) user & group entries */
 int f_sort = 0;
 int f_merge = 0;
@@ -65,8 +69,8 @@ int f_adopt_stale_user_owner = 0;
 int f_adopt_stale_group_owner = 0;
 
 
-acl_t saved_dir_acl = NULL;
-acl_t saved_file_acl = NULL;
+acl_t inherited_dir_acl = NULL;
+acl_t inherited_file_acl = NULL;
 
 char *argv0 = "aclrepair";
 
@@ -238,6 +242,58 @@ gidmap_add(char *s) {
 
 
 
+int
+acl_entry_equal(acl_entry_t ea,
+		acl_entry_t eb) {
+    acl_tag_t ta, tb;
+    acl_flagset_t fa, fb;
+    acl_entry_type_t eta, etb;
+    uid_t ua, ub, *uap, *ubp;
+    gid_t ga, gb, *gap, *gbp;
+    
+
+    acl_get_tag_type(ea, &ta);
+    acl_get_tag_type(eb, &tb);
+    if (ta != tb)
+	return 0;
+    
+    switch (ta) {
+    case ACL_USER:
+	uap = (uid_t *) acl_get_qualifier(ea);
+	ua = *uap;
+	acl_free(uap);
+	ubp = (uid_t *) acl_get_qualifier(eb);
+	ub = *ubp;
+	acl_free(ubp);
+	if (ua != ub)
+	    return 0;
+	break;
+	
+    case ACL_GROUP:
+	gap = (gid_t *) acl_get_qualifier(ea);
+	ga = *gap;
+	acl_free(gap);
+	gbp = (gid_t *) acl_get_qualifier(eb);
+	gb = *gbp;
+	acl_free(gbp);
+	if (ga != gb)
+	    return 0;
+	break;
+    }
+    
+    acl_get_entry_type_np(ea, &eta);
+    acl_get_entry_type_np(eb, &etb);
+    if (eta != etb)
+	return 0;
+    
+    acl_get_flagset_np(ea, &fa);
+    acl_get_flagset_np(eb, &fb);
+    if (*fa != *fb)
+	return 0;
+    
+    return 1;
+}
+
 
 
 /* &nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt */
@@ -249,68 +305,18 @@ acl_merge(acl_t a) {
     
     for (i = 0; i < a->ats_acl.acl_cnt; i++) {
 	acl_entry_t ea;
-	acl_tag_t ta;
 	acl_permset_t pa;
-	acl_flagset_t fa;
-	acl_entry_type_t eta;
-	uid_t ua, *uap;
-	gid_t ga, *gap;
 	
 	ea = &a->ats_acl.acl_entry[i];
-	acl_get_tag_type(ea, &ta);
-	switch (ta) {
-	case ACL_USER:
-	    uap = (uid_t *) acl_get_qualifier(ea);
-	    ua = *uap;
-	    acl_free(uap);
-	    break;
-	case ACL_GROUP:
-	    gap = (gid_t *) acl_get_qualifier(ea);
-	    ga = *gap;
-	    acl_free(gap);
-	    break;
-	}
-	acl_get_flagset_np(ea, &fa);
-	acl_get_entry_type_np(ea, &eta);
 	acl_get_permset(ea, &pa);
 
 	/* Look for duplicate entries */
 	for (j = i+1; j < a->ats_acl.acl_cnt; j++) {
 	    acl_entry_t eb;
-	    acl_entry_type_t etb;
-	    acl_tag_t tb;
 	    acl_permset_t pb;
-	    acl_flagset_t fb;
-	    uid_t ub, *ubp;
-	    gid_t gb, *gbp;
-	    
-	    eb = &a->ats_acl.acl_entry[j];
-	    acl_get_tag_type(eb, &tb);
-	    if (tb != ta)
-		continue;
-	    
-	    switch (tb) {
-	    case ACL_USER:
-		ubp = (uid_t *) acl_get_qualifier(eb);
-		ub = *ubp;
-		acl_free(ubp);
-		if (ua != ub)
-		    continue;
-		break;
-	    case ACL_GROUP:
-		gbp = (gid_t *) acl_get_qualifier(eb);
-		gb = *gbp;
-		acl_free(gbp);
-		if (ga != gb)
-		    continue;
-		break;
-	    }
-	    acl_get_entry_type_np(eb, &etb);
-	    if (etb != eta)
-		continue;
 
-	    acl_get_flagset_np(eb, &fb);
-	    if (*fa != *fb)
+	    eb = &a->ats_acl.acl_entry[j];
+	    if (acl_entry_equal(ea, eb) != 1)
 		continue;
 	    
 	    /* Same entry tag type, flags & type (allow/deny) */
@@ -320,6 +326,7 @@ acl_merge(acl_t a) {
 	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
 		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
 	    a->ats_acl.acl_cnt--;
+	    --j;
 	    rc++;
 	}
     }
@@ -339,7 +346,6 @@ acl_entry_compare(const void *va,
   acl_flagset_t afs, bfs;
   int v;
   int inherited_a, inherited_b;
-  int inherit_only_a, inherit_only_b;
   uid_t *qa, *qb;
   
 
@@ -355,15 +361,7 @@ acl_entry_compare(const void *va,
   if (v)
     return v;
 
-  
-  inherit_only_a = acl_get_flag_np(afs, ACL_ENTRY_INHERIT_ONLY);
-  inherit_only_b = acl_get_flag_np(bfs, ACL_ENTRY_INHERIT_ONLY);
 
-  /* Ignore this entry if the 'inherit_only' flag is set on one of them */
-  if (inherit_only_a || inherit_only_b)
-    return 0;
-
-  
   /* order: owner@ - user - group@ - group - everyone@ */
   ta = tb = 0;
   
@@ -415,6 +413,11 @@ acl_entry_compare(const void *va,
   if (v)
     return v;
 
+  /* Compare the entries on the flags */
+  v = *afs-*bfs;
+  if (v)
+      return v;
+  
   return 0;
 }
 
@@ -425,19 +428,31 @@ acl_entry_compare(const void *va,
  *     foreach ID (x)
  *       foreach TYPE (deny, allow)
  */
-acl_t
+int
 acl_sort(acl_t ap) {
-  acl_t nap;
-
-
-  nap = acl_dup(ap);
-  if (!nap)
-    return NULL;
-
-  qsort(&nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt, sizeof(nap->ats_acl.acl_entry[0]), acl_entry_compare);
-  return nap;
+  qsort(&ap->ats_acl.acl_entry[0], ap->ats_acl.acl_cnt, sizeof(ap->ats_acl.acl_entry[0]),
+	acl_entry_compare);
+  
+  return ap->ats_acl.acl_cnt;
 }
 
+
+int
+acl_join(acl_t a,
+	 acl_t b) {
+    int i, rc;
+    acl_entry_t ae, be;
+
+
+    for (i = ACL_FIRST_ENTRY; (rc = acl_get_entry(b, i, &be)) == 1; i = ACL_NEXT_ENTRY) {
+	if (acl_create_entry(&a, &ae) < 0)
+	    return -1;
+	if (acl_copy_entry(ae, be) < 0)
+	    return -1;
+    }
+
+    return rc;
+}
 
 
 /* Compare two ACLs */
@@ -712,7 +727,7 @@ walker(const char *path,
        struct FTW *fp) {
     uid_t fuid = -1;
     gid_t fgid = -1;
-    acl_t a = NULL, na = NULL;
+    acl_t a = NULL;
     int acl_modified = 0;
     
 
@@ -780,7 +795,7 @@ walker(const char *path,
 	}
     }
 
-    na = a = acl_get_link_np(path, ACL_TYPE_NFS4);
+    a = acl_get_link_np(path, ACL_TYPE_NFS4);
     if (!a)
 	return -1;
 
@@ -789,7 +804,7 @@ walker(const char *path,
 	
 	if (fp->level == 0) {
 	    /* First level, set flags f+d */
-	    acl_entry_t aep;
+	    acl_entry_t ae;
 	    int eid;
 
 
@@ -804,7 +819,10 @@ walker(const char *path,
 	    }
 	    
 	    if (f_sort) {
-		na = acl_sort(a);
+		acl_t na;
+
+		na = acl_dup(a);
+		acl_sort(na);
 		if (acl_equal(a, na) == 0) {
 		    acl_modified = 1;
 		    acl_free(a);
@@ -817,63 +835,91 @@ walker(const char *path,
     
 	    if (flags == FTW_D) {
 		/* Only do this if starting with a directory */
+		inherited_dir_acl = acl_init(ACL_MAX_ENTRIES);
+		inherited_file_acl = acl_init(ACL_MAX_ENTRIES);
 
+		
 		eid = ACL_FIRST_ENTRY;
-		while (acl_get_entry(a, eid, &aep) > 0) {
-		    acl_flagset_t flags;
+		while (acl_get_entry(a, eid, &ae) > 0) {
+		    acl_flagset_t af, df, ff;
+		    acl_entry_t de, fe;
 		    
 
-		    acl_get_flagset_np(aep, &flags);
-		    if (acl_get_flag_np(flags, ACL_ENTRY_FILE_INHERIT) != 1) {
-			acl_add_flag_np(flags, ACL_ENTRY_FILE_INHERIT);
+		    acl_get_flagset_np(ae, &af);
+
+		    /* Force propagation of all ACL entries */
+		    if (f_propagate > 1) {
+			acl_add_flag_np(af, ACL_ENTRY_FILE_INHERIT);
+			acl_add_flag_np(af, ACL_ENTRY_DIRECTORY_INHERIT);
+			acl_set_flagset_np(ae, af);
 			acl_modified = 1;
 		    }
-		    if (acl_get_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT) != 1) {
-			acl_add_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT);
-			acl_modified = 1;
+
+		    /* Setup inherited subdirectory/file ACLs */
+		    if (f_propagate) {
+			if (acl_get_flag_np(af, ACL_ENTRY_FILE_INHERIT) == 1 ||
+			    acl_get_flag_np(af, ACL_ENTRY_DIRECTORY_INHERIT) == 1) {
+			    acl_create_entry(&inherited_file_acl, &fe);
+			    acl_copy_entry(fe, ae);	
+			    acl_get_flagset_np(fe, &ff);
+			    acl_delete_flag_np(ff, ACL_ENTRY_FILE_INHERIT);
+			    acl_delete_flag_np(ff, ACL_ENTRY_DIRECTORY_INHERIT);
+			    acl_delete_flag_np(ff, ACL_ENTRY_NO_PROPAGATE_INHERIT);
+			    acl_add_flag_np(ff, ACL_ENTRY_INHERITED);
+			    acl_set_flagset_np(fe, ff);
+			}
+			
+			if (acl_get_flag_np(af, ACL_ENTRY_DIRECTORY_INHERIT) == 1) {
+			    acl_create_entry(&inherited_dir_acl, &de);
+			    acl_copy_entry(de, ae);
+			    acl_get_flagset_np(de, &df);
+			    if (acl_get_flag_np(af, ACL_ENTRY_NO_PROPAGATE_INHERIT) == 1) {
+				acl_delete_flag_np(df, ACL_ENTRY_FILE_INHERIT);
+				acl_delete_flag_np(df, ACL_ENTRY_DIRECTORY_INHERIT);
+				acl_delete_flag_np(df, ACL_ENTRY_NO_PROPAGATE_INHERIT);
+			    }
+			    acl_add_flag_np(df, ACL_ENTRY_INHERITED);
+			    acl_set_flagset_np(de, df);
+			}
 		    }
-		    acl_set_flagset_np(aep, flags);
-	
-		    eid = ACL_NEXT_ENTRY;
-		}
-
-		
-		/* Setup ACLs for subdirectories (f+d+I) and files (I) */
-		
-		saved_dir_acl = acl_dup(a);
-		eid = ACL_FIRST_ENTRY;
-		while (acl_get_entry(saved_dir_acl, eid, &aep) > 0) {
-		    acl_flagset_t flags;
-	
-		    acl_get_flagset_np(aep, &flags);
-		    acl_add_flag_np(flags, ACL_ENTRY_FILE_INHERIT);
-		    acl_add_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT);
-		    acl_add_flag_np(flags, ACL_ENTRY_INHERITED);
-		    acl_set_flagset_np(aep, flags);
-	
-		    eid = ACL_NEXT_ENTRY;
-		}
-
-		saved_file_acl = acl_dup(a);
-		eid = ACL_FIRST_ENTRY;
-		while (acl_get_entry(saved_file_acl, eid, &aep) > 0) {
-		    acl_flagset_t flags;
-	
-		    acl_get_flagset_np(aep, &flags);
-		    acl_delete_flag_np(flags, ACL_ENTRY_FILE_INHERIT);
-		    acl_delete_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT);
-		    acl_add_flag_np(flags, ACL_ENTRY_INHERITED);
-		    acl_set_flagset_np(aep, flags);
 	
 		    eid = ACL_NEXT_ENTRY;
 		}
 	    }
 	} else {
 	    /* Next levels down while propagating ACLs */
+	    acl_t aa;
+
 	    
-	    na = (flags == FTW_D ? saved_dir_acl : saved_file_acl);
-	    if (acl_equal(a, na) == 0)
-		acl_modified = 1;
+	    aa = (flags == FTW_D ? inherited_dir_acl : inherited_file_acl);
+	    if (f_zero) {
+		/* Discard all other ACL entries */
+		if (acl_equal(a, aa) == 0) {
+		    acl_free(a);
+		    a = acl_dup(aa);
+		    acl_modified = 1;
+		}
+	    } else {
+		/* Merge propagated ACL entries with current ones */
+		acl_t na = acl_dup(a);
+
+		acl_join(na, aa);
+
+		acl_modified = fix_acl(na, path, sp);
+		
+		if (f_merge)
+		    acl_merge(na);	
+	
+		if (f_sort)
+		    acl_sort(na);
+		
+		if (acl_equal(a, na) == 0) {
+		    acl_free(a);
+		    a = na;
+		    acl_modified = 1;
+		} else
+		    acl_free(na);
+	    }
 	}
     } else {
 	/* No ACL inheritance propagation */
@@ -881,14 +927,16 @@ walker(const char *path,
 
 	if (f_merge) {
 	    if (acl_merge(a) > 0) {
+		acl_modified = 1;
 		if (f_verbose > 1)
 		    printf("%s: ACL Merged\n", path);
-		acl_modified = 1;
 	    }
 	}
 	
 	if (f_sort) {
-	    na = acl_sort(a);
+	    acl_t na = acl_dup(a);
+	    
+	    acl_sort(na);
 	    if (acl_equal(a, na) == 0) {
 		acl_modified = 1;
 		acl_free(a);
@@ -902,7 +950,10 @@ walker(const char *path,
 
     if (acl_modified) {
 	if (f_update) {
-	    if (acl_set_link_np(path, ACL_TYPE_NFS4, na) < 0) {
+	    if (f_debug)
+		printf("%s: Setting ACL to:\n%s", path, acl_to_text(a, NULL));
+
+	    if (acl_set_link_np(path, ACL_TYPE_NFS4, a) < 0) {
 		fprintf(stderr, "%s: Error: %s: acl_set_link_np: %s\n",
 			argv0, path, strerror(errno));
 		exit(1);
@@ -960,6 +1011,10 @@ main(int argc,
 		f_verbose++;
 		break;
 
+	    case 'd':
+		f_debug++;
+		break;
+
 	    case 'i':
 		f_ignore++;
 		break;
@@ -998,6 +1053,10 @@ main(int argc,
 
 	    case 'p':
 		f_propagate++;
+		break;
+	
+	    case 'z':
+		f_zero++;
 		break;
 	
 	    case 'U':
@@ -1053,8 +1112,10 @@ main(int argc,
 		puts("  -u                Convert owner@ to user: entries");
 		puts("  -g                Convert group@ to group: entries");
 		puts("  -p                Propagate ACL inheritance");
+		puts("  -z                Zero sub-ACLs before propagating");
 		puts("  -c                Cleanup stale (numeric) user & group ACL entries");
 		puts("  -e                Make sure special everyone@ entries exist");
+		puts("  -d                Enable debug output");
 		puts("  -U [<from>:]<to>  Define user remapping entry");
 		puts("  -G [<from>:]<to>  Define group remapping entry");
 		exit(0);

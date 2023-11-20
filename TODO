@@ -1,0 +1,1 @@
+1. Better handling of ACL inheritance (needs writing a better version of nftw())
