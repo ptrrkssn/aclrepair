@@ -31,8 +31,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include "config.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,24 +41,30 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
+#include <arpa/inet.h>
+#include <sys/extattr.h>
 
 /* Needed to get access to the internal structure of acl_t in FreeBSD */
 #define _ACL_PRIVATE 1
 #include <sys/acl.h>
 
 
-char *version = "0.3";
+char *version = "0.4";
 
-int f_update = 1;
+int f_dryrun = 0;
 int f_verbose = 0;
+int f_force = 0;
 int f_debug = 0;
 int f_ignore = 0;
-int f_user = 0;
+int f_warn = 0;
+int f_owner = 0;
 int f_group = 0;
 int f_everyone = 0;
 int f_propagate = 0;
+int f_backup = 0;
+int f_undo = 0;
 int f_zero = 0;
-int f_cleanup = 0;     /* Strip ACL of stale (numeric) user & group entries */
+int f_cleanup = 0;
 int f_sort = 0;
 int f_merge = 0;
 int f_recurse = 0;
@@ -79,6 +83,11 @@ int n_chgrp = 0;
 int n_chacl = 0;
 int n_file = 0;
 int n_warn = 0;
+
+
+char *attr_saved_uid = "se.liu.it.aclrepair.saved_uid";
+char *attr_saved_gid = "se.liu.it.aclrepair.saved_gid";
+char *attr_saved_acl = "se.liu.it.aclrepair.saved_acl";
 
 
 struct uidmap {
@@ -195,9 +204,12 @@ get_group_mapping(char *sp,
 
 
 int
-uidmap_add(char *s) {
-    struct uidmap *ump;
+uidmap_add(char *s,
+	   void *vp,
+	   void *dp) {
+    struct uidmap *ump, **head = vp;
     int rc;
+
     
     ump = malloc(sizeof(*ump));
     if (!ump)
@@ -212,14 +224,16 @@ uidmap_add(char *s) {
     if (ump->old == -1)
 	f_adopt_stale_user_owner = 1;
     
-    ump->next = uidmap;
-    uidmap = ump;
+    ump->next = *head;
+    *head = ump;
     return 0;
 }
 
 int
-gidmap_add(char *s) {
-    struct gidmap *gmp;
+gidmap_add(char *s,
+	   void *vp,
+	   void *dp) {
+    struct gidmap *gmp, **head = vp;
     int rc;
     
     gmp = malloc(sizeof(*gmp));
@@ -235,110 +249,17 @@ gidmap_add(char *s) {
     if (gmp->old == -1)
 	f_adopt_stale_group_owner = 1;
     
-    gmp->next = gidmap;
-    gidmap = gmp;
+    gmp->next = *head;
+    *head = gmp;
     return 0;
 }
 
 
 
-int
-acl_entry_equal(acl_entry_t ea,
-		acl_entry_t eb) {
-    acl_tag_t ta, tb;
-    acl_flagset_t fa, fb;
-    acl_entry_type_t eta, etb;
-    uid_t ua, ub, *uap, *ubp;
-    gid_t ga, gb, *gap, *gbp;
-    
-
-    acl_get_tag_type(ea, &ta);
-    acl_get_tag_type(eb, &tb);
-    if (ta != tb)
-	return 0;
-    
-    switch (ta) {
-    case ACL_USER:
-	uap = (uid_t *) acl_get_qualifier(ea);
-	ua = *uap;
-	acl_free(uap);
-	ubp = (uid_t *) acl_get_qualifier(eb);
-	ub = *ubp;
-	acl_free(ubp);
-	if (ua != ub)
-	    return 0;
-	break;
-	
-    case ACL_GROUP:
-	gap = (gid_t *) acl_get_qualifier(ea);
-	ga = *gap;
-	acl_free(gap);
-	gbp = (gid_t *) acl_get_qualifier(eb);
-	gb = *gbp;
-	acl_free(gbp);
-	if (ga != gb)
-	    return 0;
-	break;
-    }
-    
-    acl_get_entry_type_np(ea, &eta);
-    acl_get_entry_type_np(eb, &etb);
-    if (eta != etb)
-	return 0;
-    
-    acl_get_flagset_np(ea, &fa);
-    acl_get_flagset_np(eb, &fb);
-    if (*fa != *fb)
-	return 0;
-    
-    return 1;
-}
-
-
-
-/* &nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt */
-int
-acl_merge(acl_t a) {
-    int i, j, k;
-    int rc = 0;
-
-    
-    for (i = 0; i < a->ats_acl.acl_cnt; i++) {
-	acl_entry_t ea;
-	acl_permset_t pa;
-	
-	ea = &a->ats_acl.acl_entry[i];
-	acl_get_permset(ea, &pa);
-
-	/* Look for duplicate entries */
-	for (j = i+1; j < a->ats_acl.acl_cnt; j++) {
-	    acl_entry_t eb;
-	    acl_permset_t pb;
-
-	    eb = &a->ats_acl.acl_entry[j];
-	    if (acl_entry_equal(ea, eb) != 1)
-		continue;
-	    
-	    /* Same entry tag type, flags & type (allow/deny) */
-	    acl_get_permset(eb, &pb);
-	    *pa |= *pb;
-
-	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
-		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
-	    a->ats_acl.acl_cnt--;
-	    --j;
-	    rc++;
-	}
-    }
-
-    return rc;
-}
-
-
 /* Compare two ACL Entries */
 static int
-acl_entry_compare(const void *va,
-		  const void *vb) {
+_acl_entry_compare(const void *va,
+		   const void *vb) {
   acl_entry_t a = (acl_entry_t) va;
   acl_entry_t b = (acl_entry_t) vb;
   acl_entry_type_t aet_a, aet_b;
@@ -421,6 +342,12 @@ acl_entry_compare(const void *va,
   return 0;
 }
 
+int
+acl_entry_equal(acl_entry_t ea,
+		acl_entry_t eb) {
+    return _acl_entry_compare(ea, eb) == 0;
+}
+
 
 /* 
  * foreach CLASS (implicit, inherited)
@@ -431,10 +358,51 @@ acl_entry_compare(const void *va,
 int
 acl_sort(acl_t ap) {
   qsort(&ap->ats_acl.acl_entry[0], ap->ats_acl.acl_cnt, sizeof(ap->ats_acl.acl_entry[0]),
-	acl_entry_compare);
+	_acl_entry_compare);
   
   return ap->ats_acl.acl_cnt;
 }
+
+
+
+/* &nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt */
+int
+acl_merge(acl_t a) {
+    int i, j, k;
+    int rc = 0;
+
+    
+    for (i = 0; i < a->ats_acl.acl_cnt; i++) {
+	acl_entry_t ea;
+	acl_permset_t pa;
+	
+	ea = &a->ats_acl.acl_entry[i];
+	acl_get_permset(ea, &pa);
+
+	/* Look for duplicate entries */
+	for (j = i+1; j < a->ats_acl.acl_cnt; j++) {
+	    acl_entry_t eb;
+	    acl_permset_t pb;
+
+	    eb = &a->ats_acl.acl_entry[j];
+	    if (acl_entry_equal(ea, eb) != 1)
+		continue;
+	    
+	    /* Same entry tag type, flags & type (allow/deny) */
+	    acl_get_permset(eb, &pb);
+	    *pa |= *pb;
+
+	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
+		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
+	    a->ats_acl.acl_cnt--;
+	    --j;
+	    rc++;
+	}
+    }
+
+    return rc;
+}
+
 
 
 int
@@ -574,7 +542,7 @@ fix_acl(acl_t a,
 	    break;
       
 	case ACL_USER_OBJ:
-	    if (f_user) {
+	    if (f_owner) {
 		/* Change user@ to a user: ACL entry */
 		acl_set_tag_type(aep, ACL_USER);
 		fuid = sp->st_uid;
@@ -729,6 +697,10 @@ walker(const char *path,
     gid_t fgid = -1;
     acl_t a = NULL;
     int acl_modified = 0;
+    struct stat sb;
+    uid_t saved_uid = -1;
+    gid_t saved_gid = -1;
+    acl_t saved_acl = NULL;
     
 
     switch (flags) {
@@ -749,6 +721,7 @@ walker(const char *path,
     }
     
     ++n_file;
+
     if (f_verbose > 2) {
 	if (f_verbose > 3)
 	    printf("%s [flags=%d, base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
@@ -761,10 +734,294 @@ walker(const char *path,
     } else
 	spin();
 
+    /* Get current ACL protecting object */
+    a = acl_get_link_np(path, ACL_TYPE_NFS4);
+    if (!a) {
+	fprintf(stderr, "%s: Error: %s: Reading ACL: %s\n",
+		argv0, path, strerror(errno));
+	exit(1);
+    }
+    
+    if (f_undo > 0) {
+	/* Restore saved Owner UID & GID and ACL from Extended Attribute */
+	char *as;
+	ssize_t aslen, rlen;
+
+
+	/* Stored Backup Owner UID */
+	if ((rlen = extattr_get_link(path, EXTATTR_NAMESPACE_USER,
+				     attr_saved_uid,
+				     &saved_uid, sizeof(saved_uid))) < 0 ||
+	    rlen != sizeof(saved_uid)) {
+	    
+	    /* Ignore if no backup data found */
+	    if (rlen >= 0 || errno != ENOATTR) {
+		fprintf(stderr, "%s: Error: %s: %s: Reading Backup Owner UID: %s\n",
+			argv0, path, attr_saved_uid, rlen < 0 ? strerror(errno) : "Invalid size");
+		exit(1);
+	    }
+	    if (f_warn)
+		fprintf(stderr, "%s: Warning: %s: %s: Restoring Backup Owner UID: No backup data found\n",
+			argv0, path, attr_saved_uid);
+	} else {
+	    saved_uid = ntohl(saved_uid);
+	    
+	    if (sp->st_uid != saved_uid) {
+		if (!f_dryrun) {
+		    if (lchown(path, saved_uid, -1) < 0) {
+			fprintf(stderr, "%s: Error: %s: Restoring Owner UID: chown(uid=%d): %s\n",
+				argv0, path, saved_uid, strerror(errno));
+			exit(1);
+		    }
+		    if (f_verbose)
+			printf("%s: Owner UID Restored\n", path);
+		} else {
+		    if (f_verbose)
+			printf("%s: Owner UID (NOT) Restored\n", path);
+		}
+	    }
+	}
+
+	/* Stored Backup Owner GID */
+	if ((rlen = extattr_get_link(path, EXTATTR_NAMESPACE_USER,
+				     attr_saved_gid,
+				     &saved_gid, sizeof(saved_gid))) < 0 ||
+	    rlen != sizeof(saved_uid)) {
+	    
+	    /* Ignore if no backup data found */
+	    if (rlen >= 0 || errno != ENOATTR) {
+		fprintf(stderr, "%s: Error: %s: %s: Reading Backup Owner GID: %s\n",
+			argv0, path, attr_saved_gid, rlen < 0 ? strerror(errno) : "Invalid size");
+		exit(1);
+	    }
+	    if (f_warn)
+		fprintf(stderr, "%s: Warning: %s: %s: Restoring Backup Owner GID: No backup data found\n",
+			argv0, path, attr_saved_gid);
+	} else {
+	    saved_gid = ntohl(saved_gid);
+	    
+	    if (sp->st_gid != saved_gid) {
+		if (!f_dryrun) {
+		    if (lchown(path, -1, saved_gid) < 0) {
+			fprintf(stderr, "%s: Error: %s: Restoring Owner GID: chown(gid=%d): %s\n",
+				argv0, path, saved_gid, strerror(errno));
+			exit(1);
+		    }
+		    if (f_verbose)
+			printf("%s: Owner GID Restored\n", path);
+		} else {
+		    if (f_verbose)
+			printf("%s: Owner GID (NOT) Restored\n", path);
+		}
+	    }
+	}
+
+	
+	/* Stored Backup ACL */
+	aslen = extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, NULL, 0);
+	if (aslen < 0) {
+	    fprintf(stderr, "%s: Error: %s: %s: Reading Backup ACL: %s\n",
+		    argv0, path, attr_saved_acl, strerror(errno));
+	    exit(1);
+	}
+	
+	as = malloc(aslen);
+	if (!as) {
+	    fprintf(stderr, "%s: Error: %lu: Memory allocation error: %s\n",
+		    argv0, aslen, strerror(errno));
+	    exit(1);
+	}
+
+	/* Get stored ACL */
+	if ((rlen = extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, as, aslen)) < 0 ||
+	    rlen != aslen) {
+	    if (rlen >= 0|| errno != ENOATTR) { 
+		fprintf(stderr, "%s: Error: %s: %s: Reading Backup ACL: %s\n", 
+			argv0, path, attr_saved_gid, rlen < 0 ? strerror(errno) : "Invalid size");
+		exit(1);
+	    }
+	    if (f_warn)
+		fprintf(stderr, "%s: Warning: %s: %s: Restoring Backup ACL: No backup data found\n",
+			argv0, path, attr_saved_acl);
+	} else {
+	    saved_acl = acl_from_text(as);
+	    if (!saved_acl) {
+		fprintf(stderr, "%s: Error: %s: %s: Restoring Backup ACL: Parse failure: %s\n",
+			argv0, path, attr_saved_acl,
+			strerror(errno));
+		fprintf(stderr, "ACL:\n%s\n", as);
+		exit(1);
+	    }
+	    free(as);
+	}
+    }
+    
+
+    if (f_backup > 0) {
+	/* Stored Backup Owner UID in Extended Attribute */
+	if (!f_force && extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_uid, NULL, 0) >= 0) {
+	    fprintf(stderr, "%s: Error: %s: %s: Stored Backup UID: Already exists\n",
+		    argv0, path, attr_saved_uid);
+	    exit(1);
+	}
+	    
+	if (!f_dryrun) {
+	    uid_t uid = htonl(sp->st_uid);
+	    
+	    if (extattr_set_link(path, EXTATTR_NAMESPACE_USER, attr_saved_uid, &uid, sizeof(uid)) < 0) {
+		fprintf(stderr, "%s: Error: %s: %s: Storing Backup UID: %s\n",
+			argv0, path, attr_saved_uid, strerror(errno));
+		exit(1);
+	    }
+	    if (f_verbose > 1)
+		printf("%s: Stored Backup Owner UID\n", path);
+	} else {
+	    if (f_verbose > 1)
+		printf("%s: (NOT) Stored Backup Owner UID\n", path);
+	}
+	
+	
+	/* Stored Backup Owner GID in Extended Attribute */
+	if (!f_force && extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_gid, NULL, 0) >= 0) {
+	    fprintf(stderr, "%s: Error: %s: %s: Stored Backup GID: Already exists\n",
+		    argv0, path, attr_saved_gid);
+	    exit(1);
+	}
+	
+	if (!f_dryrun) {
+	    gid_t gid = htonl(sp->st_gid);
+	
+	    if (extattr_set_link(path, EXTATTR_NAMESPACE_USER, attr_saved_gid, &gid, sizeof(gid)) < 0) {
+		fprintf(stderr, "%s: Error: %s: %s: Storing Backup GID: %s\n",
+			argv0, path, attr_saved_gid, strerror(errno));
+		exit(1);
+	    }
+	    if (f_verbose > 1)
+		printf("%s: Stored Backup Owner GID\n", path);
+	} else {
+	    if (f_verbose > 1)
+		printf("%s: (NOT) Stored Backup Owner GID\n", path);
+	}
+	
+	/* Store Backup ACL in Extended Attribute */
+	if (a) {
+	    char *as;
+	    ssize_t alen = 0;
+
+	    as = acl_to_text_np(a, &alen, ACL_TEXT_NUMERIC_IDS);
+	    if (!as) {
+		fprintf(stderr, "%s: Error: %s: Failure converting ACL to text: %s\n",
+			argv0, path, strerror(errno));
+		exit(1);
+	    }
+	    
+	    if (!f_force && extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, NULL, 0) >= 0) {
+		fprintf(stderr, "%s: Error: %s: %s: Stored Backup ACL already exists\n",
+			argv0, path, attr_saved_acl);
+		exit(1);
+	    }
+		
+	    if (!f_dryrun) {
+		if (extattr_set_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, as, alen+1) < 0) {
+		    fprintf(stderr, "%s: Error: %s: %s: Storing Backup ACL: %s\n",
+			    argv0, path, attr_saved_acl, strerror(errno));
+		    exit(1);
+		}
+		if (f_verbose > 1)
+		    printf("%s: Stored Backup ACL\n", path);
+	    } else {
+		if (f_verbose > 1)
+		    printf("%s: (NOT) Stored Backup ACL\n", path);
+	    }
+	    acl_free(as);
+	}
+    } else if (f_backup < 0) {
+	/* Remove ACL backup extended attributes */
+	if (!f_dryrun) {
+	    int rc;
+	    
+	    if ((rc = extattr_delete_link(path, EXTATTR_NAMESPACE_USER, attr_saved_uid)) < 0 && errno != ENOATTR) {
+		fprintf(stderr, "%s: Error: %s: %s: Removing Backup UID: %s\n",
+			argv0, path, attr_saved_uid, strerror(errno));
+		exit(1);
+	    }
+	    if (f_verbose && rc >= 0)
+		printf("%s: Removed Backup UID\n", path);
+	} else {
+	    if (f_verbose)
+		printf("%s: (NOT) Removed Backup UID\n", path);
+	}
+	if (!f_dryrun) {
+	    int rc;
+	    
+	    if ((rc = extattr_delete_link(path, EXTATTR_NAMESPACE_USER, attr_saved_gid)) < 0 && errno != ENOATTR) {
+		fprintf(stderr, "%s: Error: %s: %s: Removing Backup GID: %s\n",
+			argv0, path, attr_saved_gid, strerror(errno));
+		exit(1);
+	    }
+	    if (f_verbose && rc >= 0)
+		printf("%s: Removed Backup GID\n", path);
+	} else {
+	    if (f_verbose)
+		printf("%s: (NOT) Removed Backup GID\n", path);
+	}
+	
+	if (!f_dryrun) {
+	    int rc;
+	    
+	    if ((rc = extattr_delete_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl)) < 0 && errno != ENOATTR) {
+		fprintf(stderr, "%s: Error: %s: %s: Removing Backup ACL: %s\n",
+			argv0, path, attr_saved_acl, strerror(errno));
+		exit(1);
+	    }
+	    if (f_verbose && rc >= 0)
+		printf("%s: Removed Backup ACL\n", path);
+	} else {
+	    if (f_verbose)
+		printf("%s: (NOT) Removed Backup ACL\n", path);
+	}
+    }
+
+
+    /* We do this after a potential backup operation in order to allow swapping current & backup */
+    if (f_undo) {
+	/* Refresh stat information */
+	if (sp->st_uid != saved_uid || sp->st_gid != saved_gid) {
+	    if (lstat(path, &sb) < 0) {
+		fprintf(stderr, "%s: Error: %s: lstat: %s\n",
+			argv0, path, strerror(errno));
+		exit(1);
+	    }
+	    sp = &sb;
+	}
+
+	if (acl_equal(a, saved_acl) != 1) {
+	    /* Update stored ACL */
+	    if (!f_dryrun) {
+		if (acl_set_link_np(path, ACL_TYPE_NFS4, saved_acl) < 0) {
+		    fprintf(stderr, "%s: Error: %s: acl_set_link_np: %s\n",
+			    argv0, path, strerror(errno));
+		    exit(1);
+		}
+		if (f_verbose)
+		    printf("%s: Restored ACL\n", path);
+	    } else {
+		if (f_verbose)
+		    printf("%s: (NOT) Restored ACL\n", path);
+	    }
+	    
+	    acl_modified = 1;
+	}
+
+	acl_free(a);
+	a = saved_acl;
+    }
+
+    
     if (uidmap_lookup(sp->st_uid, &fuid) == 1 ||
 	(f_adopt_stale_user_owner && getpwuid(sp->st_uid) == NULL && uidmap_lookup(-1, &fuid) == 1)) {
 	n_chuid++;
-	if (f_update) {
+	if (!f_dryrun) {
 	    if (lchown(path, fuid, -1) < 0) {
 		fprintf(stderr, "%s: Error: %s: chown(uid=%d): %s\n",
 			argv0, path, fuid, strerror(errno));
@@ -777,11 +1034,10 @@ walker(const char *path,
 		printf("%s: User Owner (NOT) Updated\n", path);
 	}
     }
-
     if (gidmap_lookup(sp->st_gid, &fgid) == 1 ||
 	(f_adopt_stale_group_owner && getgrgid(sp->st_gid) == NULL && gidmap_lookup(-1, &fgid) == 1)) {
 	n_chgrp++;
-	if (f_update) {
+	if (!f_dryrun) {
 	    if (lchown(path, -1, fgid) < 0) {
 		fprintf(stderr, "%s: Error: %s: chown(gid=%d): %s\n",
 			argv0, path, fgid, strerror(errno));
@@ -794,10 +1050,6 @@ walker(const char *path,
 		printf("%s: Group Owner (NOT) Updated\n", path);
 	}
     }
-
-    a = acl_get_link_np(path, ACL_TYPE_NFS4);
-    if (!a)
-	return -1;
 
     if (f_propagate) {
 	/* Propagate ACL inheritance down the tree */
@@ -949,7 +1201,7 @@ walker(const char *path,
     }
 
     if (acl_modified) {
-	if (f_update) {
+	if (!f_dryrun) {
 	    if (f_debug)
 		printf("%s: Setting ACL to:\n%s", path, acl_to_text(a, NULL));
 
@@ -973,163 +1225,208 @@ walker(const char *path,
 
 
 
+int
+usage(char *s,
+      void *vp,
+      void *dp);
+
+
+struct options {
+    char c;
+    char *s;
+    char *a;
+    char *h;
+    void *v;
+    int (*p)(char *s, void *vp, void *dp);
+} options[] = {
+    { 'h', "help",      "", "Display this information", NULL, usage },
+    { 'v', "verbose",   "", "Be more verbose", &f_verbose, NULL },
+    { 'w', "warning",   "", "Enable warnings", &f_warn, NULL },
+    { 'f', "force",     "", "Force/overwrite mode", &f_force, NULL },
+    { 'd', "debug",     "", "Enable debugging output", &f_debug, NULL },
+    { 'i', "ignore",    "", "Ignore some soft errors", &f_ignore, NULL },
+    { 'r', "recurse",   "", "Recurse into subdirectories/files", &f_recurse, NULL },
+    { 'n', "dry-run",   "", "No-update mode", &f_dryrun, NULL },
+    { 'o', "owner",     "", "Convert owner@ to user: entries", &f_owner, NULL },
+    { 'g', "group",     "", "Convert group@ to group: entries", &f_group, NULL },
+    { 'c', "cleanup",   "", "Remove stale ACL entries", &f_cleanup, NULL },
+    { 's', "sort",      "", "Sort ACL entries", &f_sort, NULL },
+    { 'm', "merge",     "", "Merge redundant ACL entries", &f_merge, NULL },
+    { 'e', "everyone",  "", "Add everyone@ entry if it doesn't exist", &f_everyone, NULL },
+    { 'p', "propagate", "", "Propagate ACLs to subdirectories/files", &f_propagate, NULL },
+    { 'z', "zero",      "", "Zero out ACL before propagation", &f_zero, NULL },
+    { 'b', "backup",    "", "Backup ACLs to Extended Attributes", &f_backup, NULL },
+    { 'u', "undo",      "", "Restore ACLs from Extended Attributes", &f_undo, NULL },
+    { 'U', "usermap",   "[<from>:]<to>", "Add user mapping entry", &uidmap, uidmap_add },
+    { 'G', "groupmap",  "[<from>:]<to>", "Add group mapping entry", &gidmap, gidmap_add },
+    { 0, NULL, NULL, NULL, NULL, NULL }
+};
+
+
+int
+usage(char *s,
+      void *vp,
+      void *dp) {
+    int i, len = 0;
+
+    
+    if (s)
+	len = strlen(s);
+    
+    printf("Usage:\n  %s [<options>] <path>\n\n", argv0);
+    puts("Options:");
+    for (i = 0; options[i].s; i++) {
+	if (!s || ((len == 1 && options[i].c == *s) || strcmp(options[i].s, s) == 0))
+	    printf("  -%c, --%-10s  %-16s  %s\n",
+		   options[i].c, options[i].s, options[i].a, options[i].h);
+    }
+    exit(0);
+}
+
+
+int
+int_get(char *s,
+	void *vp,
+	void *dp) {
+    int *ip = vp;
+    
+
+    if (!s || strcmp(s, "+") == 0) {
+	*ip += (dp ? * (int *) dp : 1);
+	return 1;
+    }
+
+    if (strcmp(s, "-") == 0) {
+	*ip -= (dp ? * (int *) dp : 1);
+	return 1;
+    }
+    
+    if (strcmp(s, "no") == 0 ||
+	strcmp(s, "off") == 0 ||
+	strcmp(s, "false") == 0) {
+	*ip = 0;
+	return 1;
+    }
+
+    if (strcmp(s, "yes") == 0 ||
+	strcmp(s, "on") == 0 ||
+	strcmp(s, "true") == 0) {
+	*ip = 1;
+	return 1;
+    }
+
+    return sscanf(s, "%d", ip);
+}
 
 
 
 
 int
-main(int argc,
-     char *argv[]) {
-    int i, j, rc;
-  
+args_parse(int *ip,
+	   int argc,
+	   char **argv) {
+    int j, k, rc;
+    int (*parser)(char *s, void *vp, void *dp);
+    
+    for (*ip = 1; *ip < argc && argv[*ip][0] == '-'; ++*ip) {
+	char *vp = NULL;
+ 	
 
-    argv0 = argv[0];
-    for (i = 1; i < argc && argv[i][0] == '-'; i++) {
-	if (argv[i][1] == '\0' || (argv[i][1] == '-' && argv[i][2] == '\0')) {
-	    ++i;
-	    goto LastArg;
+	
+	if (argv[*ip][1] == '\0' || (argv[*ip][1] == '-' && argv[*ip][2] == '\0')) {
+	    ++*ip;
+	    return 0;
 	}
-
 	
-	for (j = 1; argv[i][j]; j++) {
-	    char *vp = NULL;
-	    int c = argv[i][j];
+	/* Long argument */
+	if (argv[*ip][1] == '-') {
+	    char *s;
+	    int d = 1;
+	    
+	    vp = strchr(argv[*ip]+2, '=');
+	    if (vp)
+		*vp++ = '\0';
 
-	Again:
-	    switch (c) {
-	    case '-':
-		vp = strchr(argv[i]+j+1, '=');
-		if (vp)
-		    *vp++ = '\0';
-		if (strcmp(argv[i]+j+1, "help") == 0) {
-		    c = 'h';
-		    goto Again;
-		}
-		break;
-		
-	    case 'v':
-		f_verbose++;
-		break;
-
-	    case 'd':
-		f_debug++;
-		break;
-
-	    case 'i':
-		f_ignore++;
-		break;
-
-	    case 'r':
-		f_recurse++;
-		break;
-		
-	    case 'n':
-		f_update = 0;
-		break;
-
-	    case 'u':
-		f_user++;
-		break;
-
-	    case 'g':
-		f_group++;
-		break;
-
-	    case 'c':
-		f_cleanup++;
-		break;
-	
-	    case 's':
-		f_sort++;
-		break;
-	
-	    case 'm':
-		f_merge++;
-		break;
-	
-	    case 'e':
-		f_everyone++;
-		break;
-
-	    case 'p':
-		f_propagate++;
-		break;
-	
-	    case 'z':
-		f_zero++;
-		break;
-	
-	    case 'U':
-		if (argv[i][j+1]) {
-		    ++j;
-		    rc = uidmap_add(argv[i]+j);
-		} else if (i+1 < argc) {
-		    j = 0;
-		    rc = uidmap_add(argv[++i]);
-		}
-		switch (rc) {
-		case -1:
-		    fprintf(stderr, "%s: Error: %s: Invalid user mapping (source)\n",
-			    argv[0], argv[i]+j);
-		    exit(1);
-		case -2:
-		    fprintf(stderr, "%s: Error: %s: Invalid user mapping (destination)\n",
-			    argv[0], argv[i]+j);
-		    exit(1);
-		}
-		goto NextArg;
-	  
-	    case 'G':
-		if (argv[i][j+1]) {
-		    ++j;
-		    rc = gidmap_add(argv[i]+j);
-		} else if (i+1 < argc) {
-		    j = 0;
-		    rc = gidmap_add(argv[++i]);
-		}
-		switch (rc) {
-		case -1:
-		    fprintf(stderr, "%s: Error: %s: Invalid group mapping (source)\n",
-			    argv[0], argv[i]+j);
-		    exit(1);
-		case -2:
-		    fprintf(stderr, "%s: Error: %s: Invalid group mapping (destination)\n",
-			    argv[0], argv[i]+j);
-		    exit(1);
-		}
-		goto NextArg;
-	  
-	    case 'h':
-		printf("Usage:\n  %s [<options>] <path>\n\n", argv[0]);
-		puts("Options:");
-		puts("  -h                Display this information");
-		puts("  -v                Be more verbose");
-		puts("  -i                Ignore non-fatal errors");
-		puts("  -n                No-update mode");
-		puts("  -r                Recurse into subdirectories");
-		puts("  -s                Sort ACL entries");
-		puts("  -m                Merge redundant ACL entries");
-		puts("  -u                Convert owner@ to user: entries");
-		puts("  -g                Convert group@ to group: entries");
-		puts("  -p                Propagate ACL inheritance");
-		puts("  -z                Zero sub-ACLs before propagating");
-		puts("  -c                Cleanup stale (numeric) user & group ACL entries");
-		puts("  -e                Make sure special everyone@ entries exist");
-		puts("  -d                Enable debug output");
-		puts("  -U [<from>:]<to>  Define user remapping entry");
-		puts("  -G [<from>:]<to>  Define group remapping entry");
-		exit(0);
-	
-	    default:
-		fprintf(stderr, "%s: Error: -%c: Invalid switch\n",
-			argv[0], argv[i][j]);
+	    s = argv[*ip]+2;
+	    if (strncmp(s, "no-", 3) == 0) {
+		d = -1;
+		s += 3;
+	    }
+	    
+	    for (k = 0; strcmp(options[k].s, s) != 0; k++)
+		;
+	    if (!options[k].s) {
+		fprintf(stderr, "%s: Error: %s: Invalid switch\n",
+			argv0, argv[*ip]);
 		exit(1);
 	    }
+
+	    parser = options[k].p ? options[k].p : int_get;
+	    if (vp && options[k].v)
+		rc = parser(vp, options[k].v, &d);
+	    else if (argv[*ip+1] && options[k].v && (rc = parser(argv[*ip+1], options[k].v, &d)) == 1) {
+		++*ip;
+	    } else
+		rc = parser(NULL, options[k].v, &d);
+	    
+	    if (rc < 0) {
+		if (vp) 
+		    fprintf(stderr, "%s: Error: --%s=%s: Invalid value\n",
+			    argv0, options[k].s, vp);
+		else 
+		    fprintf(stderr, "%s: Error: --%s: Parse failure\n",
+			    argv0, options[k].s);
+		exit(1);
+	    }
+	} else {
+	    /* Short options */
+	    for (j = 1; argv[*ip][j]; j++) {
+		int d = 1;
+
+		
+		for (k = 0; options[k].s && (options[k].c != argv[*ip][j]); k++)
+		    ;
+		if (!options[k].s) {
+		    fprintf(stderr, "%s: Error: -%c: Invalid switch\n",
+			    argv[0], argv[*ip][j]);
+		    exit(1);
+		}
+
+		parser = options[k].p ? options[k].p : int_get;
+		if (argv[*ip][j+1] && options[k].v && (rc = parser(vp = argv[*ip]+j+1, options[k].v, &d)) == 1) {
+		    break;
+		} else if (argv[*ip+1] && options[k].v && (rc = parser(vp = argv[*ip+1], options[k].v, &d)) == 1) {
+		    ++*ip;
+		    break;
+		} else
+		    rc = parser(vp = NULL, options[k].v, &d);
+		
+		if (rc < 0) {
+		    if (vp) 
+			fprintf(stderr, "%s: Error: -%c: Invalid value\n",
+				argv0, argv[*ip][j]);
+		    else 
+			fprintf(stderr, "%s: Error: -%c: Parse failure\n",
+				argv0, argv[*ip][j]);
+		    exit(1);
+		} 
+	    }
 	}
-    NextArg:;
     }
- LastArg:
+
+    return 0;
+}
+
+int
+main(int argc,
+     char *argv[]) {
+    int i;
+
     
+    argv0 = argv[0];
+
+    args_parse(&i, argc, argv);
+
     if (f_verbose)
 	printf("[aclrepair, v%s - Copyright (c) 2023 Peter Eriksson <pen@lysator.liu.se>]\n",
 	       version);
@@ -1155,7 +1452,7 @@ main(int argc,
 	       n_file, n_chuid, n_chgrp,
 	       (n_chuid+n_chgrp) == 1 ? "" : "s",
 	       n_chacl, n_chacl == 1 ? "y" : "ies",
-	       f_update ? "" : "(NOT) ",
+	       f_dryrun ? "(NOT) " : "",
 	       n_warn, n_warn == 1 ? "" : "s");
     return 0;
 }

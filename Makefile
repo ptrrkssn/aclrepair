@@ -1,6 +1,6 @@
 # Makefile for aclrepair
 
-CFLAGS=-g -O -Wall
+CFLAGS=-g -Wall
 
 BINS=aclrepair
 OBJS=aclrepair.o
