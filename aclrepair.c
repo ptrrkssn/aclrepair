@@ -1,6 +1,6 @@
 /*
-** aclrepair.c
-**
+ * aclrepair.c
+ *
  * Copyright (c) 2023, Peter Eriksson <pen@lysator.liu.se>
  *
  * All rights reserved.
@@ -44,12 +44,11 @@
 #include <arpa/inet.h>
 #include <sys/extattr.h>
 
-/* Needed to get access to the internal structure of acl_t in FreeBSD */
-#define _ACL_PRIVATE 1
-#include <sys/acl.h>
+#include "acls.h"
+#include "argv.h"
 
 
-char *version = "0.4";
+char *version = "0.5";
 
 int f_dryrun = 0;
 int f_verbose = 0;
@@ -62,7 +61,7 @@ int f_group = 0;
 int f_everyone = 0;
 int f_propagate = 0;
 int f_backup = 0;
-int f_undo = 0;
+int f_restore = 0;
 int f_zero = 0;
 int f_cleanup = 0;
 int f_sort = 0;
@@ -71,7 +70,6 @@ int f_recurse = 0;
 
 int f_adopt_stale_user_owner = 0;
 int f_adopt_stale_group_owner = 0;
-
 
 acl_t inherited_dir_acl = NULL;
 acl_t inherited_file_acl = NULL;
@@ -83,7 +81,6 @@ int n_chgrp = 0;
 int n_chacl = 0;
 int n_file = 0;
 int n_warn = 0;
-
 
 char *attr_saved_uid = "se.liu.it.aclrepair.saved_uid";
 char *attr_saved_gid = "se.liu.it.aclrepair.saved_gid";
@@ -254,259 +251,6 @@ gidmap_add(char *s,
     return 0;
 }
 
-
-
-/* Compare two ACL Entries */
-static int
-_acl_entry_compare(const void *va,
-		   const void *vb) {
-  acl_entry_t a = (acl_entry_t) va;
-  acl_entry_t b = (acl_entry_t) vb;
-  acl_entry_type_t aet_a, aet_b;
-  acl_tag_t ta, tb;
-  acl_flagset_t afs, bfs;
-  int v;
-  int inherited_a, inherited_b;
-  uid_t *qa, *qb;
-  
-
-  afs = bfs = NULL;
-  acl_get_flagset_np(a, &afs);
-  acl_get_flagset_np(b, &bfs);
-  
-  inherited_a = acl_get_flag_np(afs, ACL_ENTRY_INHERITED);
-  inherited_b = acl_get_flag_np(bfs, ACL_ENTRY_INHERITED);
-
-  /* Explicit entries goes before inherited ones */
-  v = inherited_a-inherited_b;
-  if (v)
-    return v;
-
-
-  /* order: owner@ - user - group@ - group - everyone@ */
-  ta = tb = 0;
-  
-  if (acl_get_tag_type(a, &ta) < 0)
-    return -1;
-  
-  if (acl_get_tag_type(b, &tb) < 0)
-    return 1;
-
-  v = ta-tb;
-  if (v)
-    return v;
-
-  switch (ta) {
-  case ACL_USER:
-    qa = (uid_t *) acl_get_qualifier(a);
-    qb = (uid_t *) acl_get_qualifier(b);
-    v = (*qa-*qb);
-    acl_free((void *) qa);
-    acl_free((void *) qb);
-    if (v)
-      return v;
-    break;
-    
-  case ACL_GROUP:
-    qa = (uid_t *) acl_get_qualifier(a);
-    qb = (uid_t *) acl_get_qualifier(b);
-    v = (*qa-*qb);
-    acl_free((void *) qa);
-    acl_free((void *) qb);
-    if (v)
-      return v;
-    break;
-
-  default:
-    break;
-  }
-
-  aet_a = aet_b = 0;
-  
-  /* Deny entries goes before allow ones */
-  if (acl_get_entry_type_np(a, &aet_a) < 0)
-    return -1;
-  
-  if (acl_get_entry_type_np(b, &aet_b) < 0)
-    return 1;
-
-  v = aet_b - aet_a;
-  if (v)
-    return v;
-
-  /* Compare the entries on the flags */
-  v = *afs-*bfs;
-  if (v)
-      return v;
-  
-  return 0;
-}
-
-int
-acl_entry_equal(acl_entry_t ea,
-		acl_entry_t eb) {
-    return _acl_entry_compare(ea, eb) == 0;
-}
-
-
-/* 
- * foreach CLASS (implicit, inherited)
- *   foreach TAG (owner@, user:uid, group@, group:gid, everyone@)
- *     foreach ID (x)
- *       foreach TYPE (deny, allow)
- */
-int
-acl_sort(acl_t ap) {
-  qsort(&ap->ats_acl.acl_entry[0], ap->ats_acl.acl_cnt, sizeof(ap->ats_acl.acl_entry[0]),
-	_acl_entry_compare);
-  
-  return ap->ats_acl.acl_cnt;
-}
-
-
-
-/* &nap->ats_acl.acl_entry[0], nap->ats_acl.acl_cnt */
-int
-acl_merge(acl_t a) {
-    int i, j, k;
-    int rc = 0;
-
-    
-    for (i = 0; i < a->ats_acl.acl_cnt; i++) {
-	acl_entry_t ea;
-	acl_permset_t pa;
-	
-	ea = &a->ats_acl.acl_entry[i];
-	acl_get_permset(ea, &pa);
-
-	/* Look for duplicate entries */
-	for (j = i+1; j < a->ats_acl.acl_cnt; j++) {
-	    acl_entry_t eb;
-	    acl_permset_t pb;
-
-	    eb = &a->ats_acl.acl_entry[j];
-	    if (acl_entry_equal(ea, eb) != 1)
-		continue;
-	    
-	    /* Same entry tag type, flags & type (allow/deny) */
-	    acl_get_permset(eb, &pb);
-	    *pa |= *pb;
-
-	    for (k = j; k < a->ats_acl.acl_cnt-1; k++)
-		a->ats_acl.acl_entry[k] = a->ats_acl.acl_entry[k+1];
-	    a->ats_acl.acl_cnt--;
-	    --j;
-	    rc++;
-	}
-    }
-
-    return rc;
-}
-
-
-
-int
-acl_join(acl_t a,
-	 acl_t b) {
-    int i, rc;
-    acl_entry_t ae, be;
-
-
-    for (i = ACL_FIRST_ENTRY; (rc = acl_get_entry(b, i, &be)) == 1; i = ACL_NEXT_ENTRY) {
-	if (acl_create_entry(&a, &ae) < 0)
-	    return -1;
-	if (acl_copy_entry(ae, be) < 0)
-	    return -1;
-    }
-
-    return rc;
-}
-
-
-/* Compare two ACLs */
-int
-acl_equal(acl_t aa,
-	  acl_t ab) {
-    acl_entry_t ea, eb;
-    int ra, rb, rc;
-
-
-    ra = acl_get_entry(aa, ACL_FIRST_ENTRY, &ea);
-    rb = acl_get_entry(ab, ACL_FIRST_ENTRY, &eb);
-  
-    while (ra == 1 && rb == 1) {
-	acl_tag_t tta, ttb;
-	uid_t *uidap, *uidbp;
-	gid_t *gidap, *gidbp;
-	acl_permset_t pa, pb;
-	acl_flagset_t fa, fb;
-	acl_entry_type_t eta, etb;
-
-	if (acl_get_tag_type(ea, &tta) < 0)
-	    return -1;
-    
-	if (acl_get_tag_type(eb, &ttb) < 0)
-	    return -2;
-    
-	if (tta != ttb)
-	    return 0;
-
-	switch (tta) {
-	case ACL_USER:
-	    uidap = (uid_t *) acl_get_qualifier(ea);
-	    uidbp = (uid_t *) acl_get_qualifier(eb);
-	    rc = (*uidap != *uidbp);
-	    acl_free((void *) uidap);
-	    acl_free((void *) uidbp);
-	    if (rc)
-		return 0;
-	    break;
-
-	case ACL_GROUP:
-	    gidap = (gid_t *) acl_get_qualifier(ea);
-	    gidbp = (gid_t *) acl_get_qualifier(eb);
-	    rc = (*gidap != *gidbp);
-	    acl_free((void *) gidap);
-	    acl_free((void *) gidbp);
-	    if (rc)
-		return 0;
-	    break;
-	}
-
-	if (acl_get_permset(ea, &pa) < 0)
-	    return -1;
-	if (acl_get_permset(eb, &pb) < 0)
-	    return -2;
-	if (*pa != *pb)
-	    return 0;
-    
-	if (acl_get_flagset_np(ea, &fa) < 0)
-	    return -1;
-	if (acl_get_flagset_np(eb, &fb) < 0)
-	    return -2;
-	if (*fa != *fb)
-	    return 0;
-    
-
-	if (acl_get_entry_type_np(ea, &eta) < 0)
-	    return -1;
-	if (acl_get_entry_type_np(eb, &etb) < 0)
-	    return -2;
-	if (eta != etb)
-	    return 0;
-    
-	ra = acl_get_entry(aa, ACL_NEXT_ENTRY, &ea);
-	rb = acl_get_entry(ab, ACL_NEXT_ENTRY, &eb);
-    }
-
-    if (ra == 0 && rb == 0)
-	return 1;
-
-    if (ra < 0 || rb < 0)
-	return -3;
-  
-    return 0;
-}
 
 
 int
@@ -742,7 +486,7 @@ walker(const char *path,
 	exit(1);
     }
     
-    if (f_undo > 0) {
+    if (f_restore > 0) {
 	/* Restore saved Owner UID & GID and ACL from Extended Attribute */
 	char *as;
 	ssize_t aslen, rlen;
@@ -984,7 +728,7 @@ walker(const char *path,
 
 
     /* We do this after a potential backup operation in order to allow swapping current & backup */
-    if (f_undo) {
+    if (f_restore) {
 	/* Refresh stat information */
 	if (sp->st_uid != saved_uid || sp->st_gid != saved_gid) {
 	    if (lstat(path, &sb) < 0) {
@@ -1231,35 +975,28 @@ usage(char *s,
       void *dp);
 
 
-struct options {
-    char c;
-    char *s;
-    char *a;
-    char *h;
-    void *v;
-    int (*p)(char *s, void *vp, void *dp);
-} options[] = {
-    { 'h', "help",      "", "Display this information", NULL, usage },
-    { 'v', "verbose",   "", "Be more verbose", &f_verbose, NULL },
-    { 'w', "warning",   "", "Enable warnings", &f_warn, NULL },
-    { 'f', "force",     "", "Force/overwrite mode", &f_force, NULL },
-    { 'd', "debug",     "", "Enable debugging output", &f_debug, NULL },
-    { 'i', "ignore",    "", "Ignore some soft errors", &f_ignore, NULL },
-    { 'r', "recurse",   "", "Recurse into subdirectories/files", &f_recurse, NULL },
-    { 'n', "dry-run",   "", "No-update mode", &f_dryrun, NULL },
-    { 'o', "owner",     "", "Convert owner@ to user: entries", &f_owner, NULL },
-    { 'g', "group",     "", "Convert group@ to group: entries", &f_group, NULL },
-    { 'c', "cleanup",   "", "Remove stale ACL entries", &f_cleanup, NULL },
-    { 's', "sort",      "", "Sort ACL entries", &f_sort, NULL },
-    { 'm', "merge",     "", "Merge redundant ACL entries", &f_merge, NULL },
-    { 'e', "everyone",  "", "Add everyone@ entry if it doesn't exist", &f_everyone, NULL },
-    { 'p', "propagate", "", "Propagate ACLs to subdirectories/files", &f_propagate, NULL },
-    { 'z', "zero",      "", "Zero out ACL before propagation", &f_zero, NULL },
-    { 'b', "backup",    "", "Backup ACLs to Extended Attributes", &f_backup, NULL },
-    { 'u', "undo",      "", "Restore ACLs from Extended Attributes", &f_undo, NULL },
-    { 'U', "usermap",   "[<from>:]<to>", "Add user mapping entry", &uidmap, uidmap_add },
-    { 'G', "groupmap",  "[<from>:]<to>", "Add group mapping entry", &gidmap, gidmap_add },
-    { 0, NULL, NULL, NULL, NULL, NULL }
+ARGVOPT options[] = {
+    { 'h', "help",      NULL,            NULL,         usage,      "Display this information" },
+    { 'v', "verbose",   NULL,            &f_verbose,   NULL,       "Be more verbose" },
+    { 'w', "warning",   NULL,            &f_warn,      NULL,       "Enable warnings" },
+    { 'f', "force",     NULL,            &f_force,     NULL,       "Force/overwrite mode" },
+    { 'd', "debug",     NULL,            &f_debug,     NULL,       "Enable debugging output" },
+    { 'i', "ignore",    NULL,            &f_ignore,    NULL,       "Ignore some soft errors" },
+    { 'r', "recurse",   NULL,            &f_recurse,   NULL,       "Recurse into subdirectories/files" },
+    { 'n', "dry-run",   NULL,            &f_dryrun,    NULL,       "No-update mode" },
+    { 'o', "owner",     NULL,            &f_owner,     NULL,       "Convert owner@ to user: entries" },
+    { 'g', "group",     NULL,            &f_group,     NULL,       "Convert group@ to group: entries" },
+    { 'c', "cleanup",   NULL,            &f_cleanup,   NULL,       "Remove stale ACL entries" },
+    { 's', "sort",      NULL,            &f_sort,      NULL,       "Sort ACL entries" },
+    { 'm', "merge",     NULL,            &f_merge,     NULL,       "Merge redundant ACL entries" },
+    { 'e', "everyone",  NULL,            &f_everyone,  NULL,       "Add everyone@ entry if it doesn't exist" },
+    { 'p', "propagate", NULL,            &f_propagate, NULL,       "Propagate ACLs to subdirectories/files" },
+    { 'z', "zero",      NULL,            &f_zero,      NULL,       "Zero out ACL before propagation" },
+    { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup ACLs to Extended Attributes" },
+    { 'u', "restore",   NULL,            &f_restore,   NULL,       "Restore ACLs from Extended Attributes" },
+    { 'U', "usermap",   "[<from>:]<to>", &uidmap,      uidmap_add, "Add user mapping entry" },
+    { 'G', "groupmap",  "[<from>:]<to>", &gidmap,      gidmap_add, "Add group mapping entry" },
+    { 0,   NULL,        NULL,            NULL,         NULL,       NULL }
 };
 
 
@@ -1267,155 +1004,12 @@ int
 usage(char *s,
       void *vp,
       void *dp) {
-    int i, len = 0;
-
-    
-    if (s)
-	len = strlen(s);
-    
-    printf("Usage:\n  %s [<options>] <path>\n\n", argv0);
+    printf("Usage:\n  %s [<options>] <path> [.. <path-N>]\n\n", argv0);
     puts("Options:");
-    for (i = 0; options[i].s; i++) {
-	if (!s || ((len == 1 && options[i].c == *s) || strcmp(options[i].s, s) == 0))
-	    printf("  -%c, --%-10s  %-16s  %s\n",
-		   options[i].c, options[i].s, options[i].a, options[i].h);
-    }
+    argv_list_options(&options[0]);
     exit(0);
 }
 
-
-int
-int_get(char *s,
-	void *vp,
-	void *dp) {
-    int *ip = vp;
-    
-
-    if (!s || strcmp(s, "+") == 0) {
-	*ip += (dp ? * (int *) dp : 1);
-	return 1;
-    }
-
-    if (strcmp(s, "-") == 0) {
-	*ip -= (dp ? * (int *) dp : 1);
-	return 1;
-    }
-    
-    if (strcmp(s, "no") == 0 ||
-	strcmp(s, "off") == 0 ||
-	strcmp(s, "false") == 0) {
-	*ip = 0;
-	return 1;
-    }
-
-    if (strcmp(s, "yes") == 0 ||
-	strcmp(s, "on") == 0 ||
-	strcmp(s, "true") == 0) {
-	*ip = 1;
-	return 1;
-    }
-
-    return sscanf(s, "%d", ip);
-}
-
-
-
-
-int
-args_parse(int *ip,
-	   int argc,
-	   char **argv) {
-    int j, k, rc;
-    int (*parser)(char *s, void *vp, void *dp);
-    
-    for (*ip = 1; *ip < argc && argv[*ip][0] == '-'; ++*ip) {
-	char *vp = NULL;
- 	
-
-	
-	if (argv[*ip][1] == '\0' || (argv[*ip][1] == '-' && argv[*ip][2] == '\0')) {
-	    ++*ip;
-	    return 0;
-	}
-	
-	/* Long argument */
-	if (argv[*ip][1] == '-') {
-	    char *s;
-	    int d = 1;
-	    
-	    vp = strchr(argv[*ip]+2, '=');
-	    if (vp)
-		*vp++ = '\0';
-
-	    s = argv[*ip]+2;
-	    if (strncmp(s, "no-", 3) == 0) {
-		d = -1;
-		s += 3;
-	    }
-	    
-	    for (k = 0; strcmp(options[k].s, s) != 0; k++)
-		;
-	    if (!options[k].s) {
-		fprintf(stderr, "%s: Error: %s: Invalid switch\n",
-			argv0, argv[*ip]);
-		exit(1);
-	    }
-
-	    parser = options[k].p ? options[k].p : int_get;
-	    if (vp && options[k].v)
-		rc = parser(vp, options[k].v, &d);
-	    else if (argv[*ip+1] && options[k].v && (rc = parser(argv[*ip+1], options[k].v, &d)) == 1) {
-		++*ip;
-	    } else
-		rc = parser(NULL, options[k].v, &d);
-	    
-	    if (rc < 0) {
-		if (vp) 
-		    fprintf(stderr, "%s: Error: --%s=%s: Invalid value\n",
-			    argv0, options[k].s, vp);
-		else 
-		    fprintf(stderr, "%s: Error: --%s: Parse failure\n",
-			    argv0, options[k].s);
-		exit(1);
-	    }
-	} else {
-	    /* Short options */
-	    for (j = 1; argv[*ip][j]; j++) {
-		int d = 1;
-
-		
-		for (k = 0; options[k].s && (options[k].c != argv[*ip][j]); k++)
-		    ;
-		if (!options[k].s) {
-		    fprintf(stderr, "%s: Error: -%c: Invalid switch\n",
-			    argv[0], argv[*ip][j]);
-		    exit(1);
-		}
-
-		parser = options[k].p ? options[k].p : int_get;
-		if (argv[*ip][j+1] && options[k].v && (rc = parser(vp = argv[*ip]+j+1, options[k].v, &d)) == 1) {
-		    break;
-		} else if (argv[*ip+1] && options[k].v && (rc = parser(vp = argv[*ip+1], options[k].v, &d)) == 1) {
-		    ++*ip;
-		    break;
-		} else
-		    rc = parser(vp = NULL, options[k].v, &d);
-		
-		if (rc < 0) {
-		    if (vp) 
-			fprintf(stderr, "%s: Error: -%c: Invalid value\n",
-				argv0, argv[*ip][j]);
-		    else 
-			fprintf(stderr, "%s: Error: -%c: Parse failure\n",
-				argv0, argv[*ip][j]);
-		    exit(1);
-		} 
-	    }
-	}
-    }
-
-    return 0;
-}
 
 int
 main(int argc,
@@ -1425,7 +1019,7 @@ main(int argc,
     
     argv0 = argv[0];
 
-    args_parse(&i, argc, argv);
+    argv_parse_options(&i, argc, argv, options);
 
     if (f_verbose)
 	printf("[aclrepair, v%s - Copyright (c) 2023 Peter Eriksson <pen@lysator.liu.se>]\n",
