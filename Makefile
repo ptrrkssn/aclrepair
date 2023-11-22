@@ -3,14 +3,14 @@
 CFLAGS=-g -Wall
 
 BINS=aclrepair
-OBJS=aclrepair.o acls.o argv.o
+OBJS=main.o acls.o argv.o
 
 all: aclrepair
 
 aclrepair: $(OBJS)
 	$(CC) -o aclrepair $(OBJS)
 
-aclrepair.o: aclrepair.c acls.h
+main.o: main.c acls.h
 acls.o: acls.c acls.h
 argv.o: argv.c argv.h
 

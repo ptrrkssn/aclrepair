@@ -1,5 +1,7 @@
 /*
- * aclrepair.c
+ * main.c
+ *
+ * Part of aclrepair
  *
  * Copyright (c) 2023, Peter Eriksson <pen@lysator.liu.se>
  *
@@ -143,9 +145,13 @@ get_user_mapping(char *sp,
 		 uid_t *ouidp,
 		 uid_t *nuidp) {
     struct passwd *pp;
-    char *dp = strchr(sp, ':');
+    char *dp, c;
 
-  
+
+    if (!sp || !*sp)
+	return 0;
+    
+    dp = strchr(sp, ':');
     if (dp)
 	*dp++ = '\0';
     else {
@@ -158,17 +164,17 @@ get_user_mapping(char *sp,
 	pp = getpwnam(sp);
 	if (pp)
 	    *ouidp = pp->pw_uid;
-	else if (sscanf(sp, "%d", ouidp) != 1)
+	else if (sscanf(sp, "%d%c", ouidp, &c) != 1)
 	    return -1;
     }
   
     pp = getpwnam(dp);
     if (pp)
 	*nuidp = pp->pw_uid;
-    else if (sscanf(dp, "%d", nuidp) != 1)
+    else if (sscanf(dp, "%d%c", nuidp, &c) != 1)
 	return -2;
   
-    return 0;
+    return 1;
 }
 
 
@@ -178,9 +184,13 @@ get_group_mapping(char *sp,
 		  gid_t *ogidp,
 		  gid_t *ngidp) {
     struct group *gp;
-    char *dp = strchr(sp, ':');
+    char *dp, c;
+    
 
-  
+    if (!sp || !*sp)
+	return 0;
+    
+    dp = strchr(sp, ':');
     if (dp)
 	*dp++ = '\0';
     else {
@@ -193,17 +203,17 @@ get_group_mapping(char *sp,
 	gp = getgrnam(sp);
 	if (gp)
 	    *ogidp = gp->gr_gid;
-	else if (sscanf(sp, "%d", ogidp) != 1)
+	else if (sscanf(sp, "%d%c", ogidp, &c) != 1)
 	    return -1;
     }
   
     gp = getgrnam(dp);
     if (gp)
 	*ngidp = gp->gr_gid;
-    else if (sscanf(dp, "%d", ngidp) != 1)
+    else if (sscanf(dp, "%d%c", ngidp, &c) != 1)
 	return -2;
   
-    return 0;
+    return 1;
 }
 
 
@@ -215,12 +225,15 @@ uidmap_add(char *s,
     int rc;
 
     
+    if (!s || !*s)
+	return -1;
+    
     ump = malloc(sizeof(*ump));
     if (!ump)
 	return -1;
-    
+
     rc = get_user_mapping(s, &ump->old, &ump->new);
-    if (rc < 0) {
+    if (rc <= 0) {
 	free(ump);
 	return rc;
     }
@@ -230,7 +243,7 @@ uidmap_add(char *s,
     
     ump->next = *head;
     *head = ump;
-    return 0;
+    return 1;
 }
 
 int
@@ -240,12 +253,16 @@ gidmap_add(char *s,
     struct gidmap *gmp, **head = vp;
     int rc;
     
+
+    if (!s || !*s)
+	return -1;
+    
     gmp = malloc(sizeof(*gmp));
     if (!gmp)
 	return -1;
     
     rc = get_group_mapping(s, &gmp->old, &gmp->new);
-    if (rc < 0) {
+    if (rc <= 0) {
 	free(gmp);
 	return rc;
     }
@@ -255,10 +272,8 @@ gidmap_add(char *s,
     
     gmp->next = *head;
     *head = gmp;
-    return 0;
+    return 1;
 }
-
-
 
 int
 fix_acl(acl_t a,
@@ -354,7 +369,7 @@ fix_acl(acl_t a,
 	    }
 	    acl_free(uidp);
 	    break;
-
+	    
 	case ACL_GROUP:
 	    gidp = (gid_t *) acl_get_qualifier(aep);
 	    if (!gidp) {
@@ -394,11 +409,11 @@ fix_acl(acl_t a,
 	    break;
 	}
     }
-  
+    
     if (f_everyone && !have_everyone) {
 	acl_permset_t perms;
 	acl_flagset_t flags;
-
+	
 	
 	acl_create_entry(&a, &aep);
 	acl_set_tag_type(aep, ACL_EVERYONE);
@@ -439,6 +454,8 @@ spin(void) {
     }
 }
 
+
+
 int
 walker(const char *path,
        const struct stat *sp,
@@ -446,8 +463,7 @@ walker(const char *path,
        struct FTW *fp) {
     uid_t fuid = -1;
     gid_t fgid = -1;
-    acl_t a = NULL;
-    int acl_modified = 0;
+    acl_t oa, a;
     struct stat sb;
     uid_t saved_uid = -1;
     gid_t saved_gid = -1;
@@ -484,11 +500,18 @@ walker(const char *path,
 	    printf("%s\n", path);
     } else
 	spin();
-
+    
     /* Get current ACL protecting object */
-    a = acl_get_link_np(path, ACL_TYPE_NFS4);
-    if (!a) {
+    oa = acl_get_link_np(path, ACL_TYPE_NFS4);
+    if (!oa) {
 	fprintf(stderr, "%s: Error: %s: Reading ACL: %s\n",
+		argv0, path, strerror(errno));
+	exit(1);
+    }
+
+    a = acl_dup(oa);
+    if (!a) {
+	fprintf(stderr, "%s: Error: %s: Internal Error: acl_dup: %s\n",
 		argv0, path, strerror(errno));
 	exit(1);
     }
@@ -578,8 +601,8 @@ walker(const char *path,
 	
 	as = malloc(aslen);
 	if (!as) {
-	    fprintf(stderr, "%s: Error: %lu: Memory allocation error: %s\n",
-		    argv0, aslen, strerror(errno));
+	    fprintf(stderr, "%s: Error: %s: Internal Error: malloc(%lu): %s\n",
+		    argv0, path, aslen, strerror(errno));
 	    exit(1);
 	}
 
@@ -655,11 +678,11 @@ walker(const char *path,
 	}
 	
 	/* Store Backup ACL in Extended Attribute */
-	if (a) {
+	if (oa) {
 	    char *as;
 	    ssize_t alen = 0;
 
-	    as = acl_to_text_np(a, &alen, ACL_TEXT_NUMERIC_IDS);
+	    as = acl_to_text_np(oa, &alen, ACL_TEXT_NUMERIC_IDS);
 	    if (!as) {
 		fprintf(stderr, "%s: Error: %s: Failure converting ACL to text: %s\n",
 			argv0, path, strerror(errno));
@@ -746,6 +769,7 @@ walker(const char *path,
 	    sp = &sb;
 	}
 
+#if 0
 	if (acl_equal(a, saved_acl) != 1) {
 	    /* Update stored ACL */
 	    if (!f_dryrun) {
@@ -763,7 +787,7 @@ walker(const char *path,
 	    
 	    acl_modified = 1;
 	}
-
+#endif
 	acl_free(a);
 	a = saved_acl;
     }
@@ -803,14 +827,15 @@ walker(const char *path,
     }
 
 
-    acl_modified = fix_acl(a, path, sp);
-
+    /* Propagate ACLS to subdirectories & files */
     if (f_propagate && fp->level > 0) {
 	struct acldata *adp = &parent_acls[fp->level-1];
 
 
 	if (f_propagate > 1) {
 	    acl_t na = acl_dup(adp->p);
+	    
+	    /* Hard propagation - copy the top-level ACL to subdirectories as-is */
 	    if (flags != FTW_D) {
 		acl_entry_t ae;
 		acl_flagset_t af;
@@ -826,10 +851,10 @@ walker(const char *path,
 		    acl_set_flagset_np(ae, af);
 		}
 	    }
+	    
 	    if (acl_equal(a, na) != 1) {
 		acl_free(a);
 		a = na;
-		acl_modified = 1;
 	    }
 	} else {
 	    acl_t inherit_acl = (flags == FTW_D ? adp->d : adp->f );
@@ -837,6 +862,14 @@ walker(const char *path,
 	    int ii;
 
 	
+	    /* First we do some basic modifications of the ACL */
+	    if (f_zero) {
+		/* Strip away all other stuff */
+		acl_free(a);
+		a = acl_init(ACL_MAX_ENTRIES);
+	    } else
+		fix_acl(a, path, sp);
+	    
 	    for (ii = ACL_FIRST_ENTRY; acl_get_entry(inherit_acl, ii, &ie) > 0; ii = ACL_NEXT_ENTRY) {
 		acl_entry_t ae;
 		int ai, rc;
@@ -849,7 +882,6 @@ walker(const char *path,
 		    if (acl_create_entry(&a, &ae) < 0)
 			abort();
 		    acl_copy_entry(ae, ie);
-		    acl_modified = 1;
 		} else {
 		    acl_permset_t ap, ip;
 		    
@@ -857,16 +889,17 @@ walker(const char *path,
 		    acl_get_permset(ie, &ip);
 		    if (ap != ip) {
 			acl_copy_entry(ae, ie);
-			acl_modified = 1;
 		    }
 		}
 	    }
 	}
+    } else {
+	/* Non-propagation - First do some basic modifications of the ACL */
+	fix_acl(a, path, sp);
     }
-	
+    
     if (f_merge) {
 	if (acl_merge(a) > 0) {
-	    acl_modified = 1;
 	    if (f_verbose > 1)
 		printf("%s: ACL Merged\n", path);
 	}
@@ -877,7 +910,6 @@ walker(const char *path,
 	
 	acl_sort(na);
 	if (acl_equal(a, na) == 0) {
-	    acl_modified = 1;
 	    acl_free(a);
 	    a = na;
 	    if (f_verbose > 1)
@@ -885,8 +917,8 @@ walker(const char *path,
 	} else
 	    acl_free(na);
     }
-	
-    if (acl_modified) {
+    
+    if (acl_equal(oa, a) != 1) {
 	if (!f_dryrun) {
 	    if (acl_set_link_np(path, ACL_TYPE_NFS4, a) < 0) {
 		fprintf(stderr, "%s: Error: %s: acl_set_link_np: %s\n",
@@ -907,7 +939,7 @@ walker(const char *path,
 	acl_entry_t e;
 	acl_t ida, ifa;
 	struct acldata *adp = &parent_acls[fp->level];
-
+	
 	if (adp->p)
 	    acl_free(adp->p);
 	adp->p = a;
@@ -950,6 +982,7 @@ walker(const char *path,
 		acl_set_flagset_np(ife, iff);
 		nfi++;
 	    }
+
 	    if (acl_get_flag_np(f, ACL_ENTRY_DIRECTORY_INHERIT) == 1) {
 		acl_entry_t ide;
 		acl_flagset_t idf;
@@ -985,12 +1018,12 @@ walker(const char *path,
 	}
     }
     
+    acl_free(oa);
     return !f_recurse;
 }
-    
 
 
-int
+extern int
 usage(char *s,
       void *vp,
       void *dp);

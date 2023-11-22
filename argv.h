@@ -1,6 +1,8 @@
 /*
  * argv.h
  *
+ * Parse command line arguments in a sane way
+ *
  * Copyright (c) 2023, Peter Eriksson <pen@lysator.liu.se>
  *
  * All rights reserved.

@@ -1,6 +1,8 @@
 /*
  * acls.c
  *
+ * Some ACL helper functions
+ *
  * Copyright (c) 2023, Peter Eriksson <pen@lysator.liu.se>
  *
  * All rights reserved.

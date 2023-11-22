@@ -1,6 +1,8 @@
 /*
  * acls.h
  *
+ * Some ACL helper functions
+ *
  * Copyright (c) 2023, Peter Eriksson <pen@lysator.liu.se>
  *
  * All rights reserved.
@@ -37,6 +39,7 @@
 /* Needed to get access to the internal structure of acl_t in FreeBSD */
 #define _ACL_PRIVATE 1
 #include <sys/acl.h>
+
 
 extern int
 acl_entry_equal(acl_entry_t ea,
