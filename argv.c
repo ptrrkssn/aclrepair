@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sysexits.h>
 
 #include "argv.h"
 
@@ -131,7 +132,7 @@ argv_parse_options(int *ip,
 	    if (!options[k].s) {
 		fprintf(stderr, "%s: Error: %s: Invalid switch\n",
 			argv[0], argv[*ip]);
-		exit(1);
+		exit(EX_USAGE);
 	    }
 
 	    parser = options[k].p ? options[k].p : int_get;
@@ -149,7 +150,7 @@ argv_parse_options(int *ip,
 		else 
 		    fprintf(stderr, "%s: Error: --%s: Parse failure\n",
 			    argv[0], options[k].s);
-		exit(1);
+		exit(EX_USAGE);
 	    }
 	} else {
 	    /* Short options */
@@ -162,7 +163,7 @@ argv_parse_options(int *ip,
 		if (!options[k].s) {
 		    fprintf(stderr, "%s: Error: -%c: Invalid switch\n",
 			    argv[0], argv[*ip][j]);
-		    exit(1);
+		    exit(EX_USAGE);
 		}
 
 		parser = options[k].p ? options[k].p : int_get;
@@ -181,7 +182,7 @@ argv_parse_options(int *ip,
 		    else 
 			fprintf(stderr, "%s: Error: -%c: Parse failure\n",
 				argv[0], argv[*ip][j]);
-		    exit(1);
+		    exit(EX_USAGE);
 		} 
 	    }
 	}
