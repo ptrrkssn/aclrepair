@@ -1,1 +1,1 @@
-1. Better handling of ACL inheritance (needs writing a better version of nftw())
+1. Handle tree depth pruning (limit recursion depth), requires using fts() instead of nftw()

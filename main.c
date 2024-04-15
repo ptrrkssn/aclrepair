@@ -33,13 +33,14 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sysexits.h>
-#include <ftw.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <pwd.h>
@@ -47,11 +48,33 @@
 #include <arpa/inet.h>
 #include <sys/extattr.h>
 
+
+#if HAVE_FTS_H
+
+#include <fts.h>
+struct FTW {
+    int base;
+    int level;
+};
+#define FTW_D   FTS_D
+#define FTW_DNR FTS_DNR
+#define FTW_NS  FTS_NS
+
+#define FTW_PHYS FTS_PHYSICAL
+#define FTW_MOUNT FTS_XDEV
+
+#else
+
+#include <ftw.h>
+
+#endif
+
+
 #include "acls.h"
 #include "argv.h"
 
 
-char *version = "0.5";
+char *version = "0.7";
 
 int f_dryrun = 0;
 int f_verbose = 0;
@@ -70,17 +93,19 @@ int f_cleanup = 0;
 int f_sort = 0;
 int f_merge = 0;
 int f_recurse = 0;
+int f_depth = 0;
 
 int f_adopt_stale_user_owner = 0;
 int f_adopt_stale_group_owner = 0;
 
-#define MAXDEPTH 1024
+
+int n_parents = 0;
 
 struct acldata {
     acl_t p; /* Parent ACL */
     acl_t d; /* Inherited ACEs for directories */
     acl_t f; /* Inherited ACEs for files */
-} parent_acls[MAXDEPTH];
+} *parent_acls = NULL;
 
 
 char *argv0 = "aclrepair";
@@ -274,6 +299,25 @@ gidmap_add(char *s,
     *head = gmp;
     return 1;
 }
+
+
+void
+parents_resize(int new_size) {
+    if (!parent_acls)
+	parent_acls = malloc(new_size * sizeof(*parent_acls));
+    else
+	parent_acls = realloc(parent_acls, new_size * sizeof(*parent_acls));
+	
+    if (!parent_acls) {
+	fprintf(stderr, "%s: Error: %lu: Memory Allocation: %s\n",
+		argv0, n_parents*sizeof(*parent_acls), strerror(errno));
+	exit(1);
+    }
+
+    while (n_parents < new_size)
+	memset(&parent_acls[n_parents++], 0, sizeof(parent_acls[0]));
+}
+
 
 int
 fix_acl(acl_t a,
@@ -470,6 +514,9 @@ walker(const char *path,
     acl_t saved_acl = NULL;
     
 
+    if (f_depth && fp->level > f_depth)
+	return 0;
+    
     switch (flags) {
     case FTW_DNR:
 	if (f_ignore)
@@ -486,19 +533,17 @@ walker(const char *path,
 		argv0, path);
 	exit(1);
     }
+
     
     ++n_file;
 
-    if (f_verbose > 2) {
-	if (f_verbose > 3)
-	    printf("%s [flags=%d, base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
-		   path,
-		   flags,
-		   fp->base, fp->level,
-		   sp->st_size, sp->st_uid, sp->st_gid);
-	else
-	    printf("%s\n", path);
-    } else
+    if (f_debug)
+	printf("%s [flags=%d, base=%d, level=%d, size=%lu, uid=%u, gid=%u]:\n",
+	       path,
+	       flags,
+	       fp->base, fp->level,
+	       sp->st_size, sp->st_uid, sp->st_gid);
+    else
 	spin();
     
     /* Get current ACL protecting object */
@@ -867,6 +912,25 @@ walker(const char *path,
 		/* Strip away all other stuff */
 		acl_free(a);
 		a = acl_init(ACL_MAX_ENTRIES);
+		if (f_everyone) {
+		    acl_entry_t aep;
+		    acl_permset_t perms;
+		    acl_flagset_t flags;
+		    
+		    
+		    acl_create_entry(&a, &aep);
+		    acl_set_tag_type(aep, ACL_EVERYONE);
+		    
+		    acl_get_permset(aep, &perms);
+		    acl_clear_perms(perms);
+		    acl_set_permset(aep, perms);
+		    
+		    acl_get_flagset_np(aep, &flags);
+		    acl_clear_flags_np(flags);
+		    acl_set_flagset_np(aep, flags);
+		    
+		    acl_set_entry_type_np(aep, ACL_ENTRY_TYPE_ALLOW);
+		}
 	    } else
 		fix_acl(a, path, sp);
 	    
@@ -923,6 +987,13 @@ walker(const char *path,
 	    if (acl_set_link_np(path, ACL_TYPE_NFS4, a) < 0) {
 		fprintf(stderr, "%s: Error: %s: acl_set_link_np: %s\n",
 			argv0, path, strerror(errno));
+		if (f_verbose > 1) {
+		    char *s = acl_to_text(a, NULL);
+		    if (s) {
+			printf("  ACL:\n%s\n", s);
+			acl_free(s);
+		    }
+		}
 		exit(1);
 	    }
 	    if (f_verbose)
@@ -938,7 +1009,13 @@ walker(const char *path,
 	int i, ndi, nfi;
 	acl_entry_t e;
 	acl_t ida, ifa;
-	struct acldata *adp = &parent_acls[fp->level];
+	struct acldata *adp;
+
+
+	if (fp->level >= n_parents)
+	    parents_resize(n_parents + 256);
+    
+	adp = &parent_acls[fp->level];	
 	
 	if (adp->p)
 	    acl_free(adp->p);
@@ -1023,6 +1100,53 @@ walker(const char *path,
 }
 
 
+
+#if HAVE_FTS_H
+int
+nftw(char *path,
+     int (*fn)(const char *path,
+	       const struct stat *sp,
+	       int flag,
+	       struct FTW *fp),
+     int maxfds,
+     int flags) {
+    FTS *ft;
+    FTSENT *np;
+    int rc = 0;
+    char *argv[2];
+
+
+    argv[0] = path;
+    argv[1] = NULL;
+    
+    ft = fts_open(argv, FTS_COMFOLLOW|FTS_PHYSICAL|FTS_NOCHDIR, NULL);
+    if (!ft)
+	return -1;
+    
+    while ((np = fts_read(ft)) != NULL) {
+	struct FTW fb;
+
+
+	/* Skip entries we already have visited */
+	if (np->fts_info == FTS_DNR || np->fts_info == FTS_DP)
+	    continue;
+	
+	fb.base = np->fts_pathlen;
+	fb.level = np->fts_level;
+	
+	rc = fn(np->fts_path, np->fts_statp, np->fts_info, &fb);
+	if (rc)
+	    break;
+	
+	if (f_depth && np->fts_level >= f_depth)
+	    fts_set(ft, np, FTS_SKIP);
+    }
+    
+    fts_close(ft);
+    return rc;
+}
+#endif
+
 extern int
 usage(char *s,
       void *vp,
@@ -1048,6 +1172,7 @@ ARGVOPT options[] = {
     { 'z', "zero",      NULL,            &f_zero,      NULL,       "Zero out ACL before propagation" },
     { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup ACLs to Extended Attributes" },
     { 'u', "restore",   NULL,            &f_restore,   NULL,       "Restore ACLs from Extended Attributes" },
+    { 'D', "max-depth", "<levels>",      &f_depth,     NULL,       "Max recurse level" },
     { 'U', "usermap",   "[<from>:]<to>", &uidmap,      uidmap_add, "Add user mapping entry" },
     { 'G', "groupmap",  "[<from>:]<to>", &gidmap,      gidmap_add, "Add group mapping entry" },
     { 0,   NULL,        NULL,            NULL,         NULL,       NULL }
@@ -1091,7 +1216,6 @@ main(int argc,
 		    argv[0], argv[i], strerror(errno));
 	    exit(1);
 	}
-    
 	++i;
     }
 
