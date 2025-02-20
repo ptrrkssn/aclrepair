@@ -74,7 +74,7 @@ struct FTW {
 #include "argv.h"
 
 
-char *version = "0.7";
+char *version = "0.8";
 
 int f_dryrun = 0;
 int f_verbose = 0;
@@ -438,7 +438,7 @@ fix_acl(acl_t a,
 		acl_modified = 1;
 		if (f_verbose > 1)
 		    printf("%s: group:%d -> group:%d: ACL Entry updated\n", path, *gidp, fgid);
-	    } else if (f_cleanup) {
+	    } else if (f_cleanup && !gp) {
 		if (acl_delete_entry(a, aep) < 0) {
 		    fprintf(stderr, "%s: Error: %s: acl_delete_entry(group:%d): %s\n",
 			    argv0, path, *gidp, strerror(errno));
@@ -733,13 +733,13 @@ walker(const char *path,
 			argv0, path, strerror(errno));
 		exit(1);
 	    }
-	    
+#if 0	    
 	    if (!f_force && extattr_get_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, NULL, 0) >= 0) {
 		fprintf(stderr, "%s: Error: %s: %s: Stored Backup ACL already exists\n",
 			argv0, path, attr_saved_acl);
 		exit(1);
 	    }
-		
+#endif		
 	    if (!f_dryrun) {
 		if (extattr_set_link(path, EXTATTR_NAMESPACE_USER, attr_saved_acl, as, alen+1) < 0) {
 		    fprintf(stderr, "%s: Error: %s: %s: Storing Backup ACL: %s\n",
@@ -1126,7 +1126,6 @@ nftw(char *path,
     while ((np = fts_read(ft)) != NULL) {
 	struct FTW fb;
 
-
 	/* Skip entries we already have visited */
 	if (np->fts_info == FTS_DNR || np->fts_info == FTS_DP)
 	    continue;
@@ -1138,7 +1137,7 @@ nftw(char *path,
 	if (rc)
 	    break;
 	
-	if (f_depth && np->fts_level >= f_depth)
+	if (np->fts_info == FTS_D && f_depth && np->fts_level >= f_depth)
 	    fts_set(ft, np, FTS_SKIP);
     }
     
