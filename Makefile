@@ -18,6 +18,7 @@ clean:
 	rm -fr core $(BINS) *.o *~ autom4te.cache \#
 
 distclean: clean
+	rm -f config.log config.status
 
 push: distclean
 	git add -A && git commit -a && git push
