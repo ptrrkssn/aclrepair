@@ -76,6 +76,8 @@ struct FTW {
 
 char *version = PACKAGE_VERSION;
 
+int f_auto = 0;
+int f_backup = 0;
 int f_dryrun = 0;
 int f_verbose = 0;
 int f_force = 0;
@@ -86,7 +88,6 @@ int f_owner = 0;
 int f_group = 0;
 int f_everyone = 0;
 int f_propagate = 0;
-int f_backup = 0;
 int f_restore = 0;
 int f_zero = 0;
 int f_cleanup = 0;
@@ -1153,7 +1154,8 @@ usage(char *s,
 
 
 ARGVOPT options[] = {
-    { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup ACLs to Extended Attributes" },
+    { 'a', "auto",      NULL,            &f_auto,      NULL,       "Enable -bemprsw flags" },
+    { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup metadata to Extended Attributes" },
     { 'c', "cleanup",   NULL,            &f_cleanup,   NULL,       "Remove stale ACL entries" },
     { 'd', "debug",     NULL,            &f_debug,     NULL,       "Enable debugging output" },
     { 'e', "everyone",  NULL,            &f_everyone,  NULL,       "Add everyone@ entry if it doesn't exist" },
@@ -1167,7 +1169,7 @@ ARGVOPT options[] = {
     { 'p', "propagate", NULL,            &f_propagate, NULL,       "Propagate ACLs to subdirectories/files" },
     { 'r', "recurse",   NULL,            &f_recurse,   NULL,       "Recurse into subdirectories/files" },
     { 's', "sort",      NULL,            &f_sort,      NULL,       "Sort ACL entries" },
-    { 'u', "restore",   NULL,            &f_restore,   NULL,       "Restore ACLs from Extended Attributes" },
+    { 'u', "restore",   NULL,            &f_restore,   NULL,       "Restore metadata from Extended Attributes" },
     { 'v', "verbose",   NULL,            &f_verbose,   NULL,       "Be more verbose" },
     { 'w', "warning",   NULL,            &f_warn,      NULL,       "Enable warnings" },
     { 'z', "zero",      NULL,            &f_zero,      NULL,       "Zero out ACL before propagation" },
@@ -1195,16 +1197,26 @@ usage(char *s,
 int
 main(int argc,
      char *argv[]) {
-    int i;
+    int i, j;
 
     
     argv0 = argv[0];
 
     argv_parse_options(&i, argc, argv, options);
 
+    for (j = 0; j < f_auto; j++) {
+	++f_backup;
+	++f_everyone;
+	++f_merge;
+	++f_propagate;
+	++f_recurse;
+	++f_sort;
+	++f_warn;
+    }
+    
     if (f_verbose)
-	printf("[aclrepair, v%s - Copyright (c) 2023-2025 Peter Eriksson <pen@lysator.liu.se>]\n",
-	       version);
+	printf("[aclrepair, v%s - Copyright (c) 2023-2025 Peter Eriksson <%s>]\n",
+	       version, PACKAGE_BUGREPORT);
     
     if (i >= argc) {
 	fprintf(stderr, "%s: Error: Missing required path(s)\n",
