@@ -74,7 +74,7 @@ struct FTW {
 #include "argv.h"
 
 
-char *version = "0.8";
+char *version = PACKAGE_VERSION;
 
 int f_dryrun = 0;
 int f_verbose = 0;
@@ -872,12 +872,12 @@ walker(const char *path,
     }
 
 
-    /* Propagate ACLS to subdirectories & files */
+    /* Propagate ACLs to subdirectories & files */
     if (f_propagate && fp->level > 0) {
 	struct acldata *adp = &parent_acls[fp->level-1];
-
-
-	if (f_propagate > 1) {
+	int tf = 0;
+	
+	if (f_propagate > 1 || (f_zero && acl_is_trivial_np(adp->d, &tf) == 0 && tf == 1)) {
 	    acl_t na = acl_dup(adp->p);
 	    
 	    /* Hard propagation - copy the top-level ACL to subdirectories as-is */
@@ -1153,27 +1153,27 @@ usage(char *s,
 
 
 ARGVOPT options[] = {
-    { 'h', "help",      NULL,            NULL,         usage,      "Display this information" },
-    { 'v', "verbose",   NULL,            &f_verbose,   NULL,       "Be more verbose" },
-    { 'w', "warning",   NULL,            &f_warn,      NULL,       "Enable warnings" },
-    { 'f', "force",     NULL,            &f_force,     NULL,       "Force/overwrite mode" },
+    { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup ACLs to Extended Attributes" },
+    { 'c', "cleanup",   NULL,            &f_cleanup,   NULL,       "Remove stale ACL entries" },
     { 'd', "debug",     NULL,            &f_debug,     NULL,       "Enable debugging output" },
+    { 'e', "everyone",  NULL,            &f_everyone,  NULL,       "Add everyone@ entry if it doesn't exist" },
+    { 'f', "force",     NULL,            &f_force,     NULL,       "Force/overwrite mode" },
+    { 'g', "group",     NULL,            &f_group,     NULL,       "Convert group@ to group: entries" },
+    { 'h', "help",      NULL,            NULL,         usage,      "Display this information" },
     { 'i', "ignore",    NULL,            &f_ignore,    NULL,       "Ignore some soft errors" },
-    { 'r', "recurse",   NULL,            &f_recurse,   NULL,       "Recurse into subdirectories/files" },
+    { 'm', "merge",     NULL,            &f_merge,     NULL,       "Merge redundant ACL entries" },
     { 'n', "dry-run",   NULL,            &f_dryrun,    NULL,       "No-update mode" },
     { 'o', "owner",     NULL,            &f_owner,     NULL,       "Convert owner@ to user: entries" },
-    { 'g', "group",     NULL,            &f_group,     NULL,       "Convert group@ to group: entries" },
-    { 'c', "cleanup",   NULL,            &f_cleanup,   NULL,       "Remove stale ACL entries" },
-    { 's', "sort",      NULL,            &f_sort,      NULL,       "Sort ACL entries" },
-    { 'm', "merge",     NULL,            &f_merge,     NULL,       "Merge redundant ACL entries" },
-    { 'e', "everyone",  NULL,            &f_everyone,  NULL,       "Add everyone@ entry if it doesn't exist" },
     { 'p', "propagate", NULL,            &f_propagate, NULL,       "Propagate ACLs to subdirectories/files" },
-    { 'z', "zero",      NULL,            &f_zero,      NULL,       "Zero out ACL before propagation" },
-    { 'b', "backup",    NULL,            &f_backup,    NULL,       "Backup ACLs to Extended Attributes" },
+    { 'r', "recurse",   NULL,            &f_recurse,   NULL,       "Recurse into subdirectories/files" },
+    { 's', "sort",      NULL,            &f_sort,      NULL,       "Sort ACL entries" },
     { 'u', "restore",   NULL,            &f_restore,   NULL,       "Restore ACLs from Extended Attributes" },
+    { 'v', "verbose",   NULL,            &f_verbose,   NULL,       "Be more verbose" },
+    { 'w', "warning",   NULL,            &f_warn,      NULL,       "Enable warnings" },
+    { 'z', "zero",      NULL,            &f_zero,      NULL,       "Zero out ACL before propagation" },
     { 'D', "max-depth", "<levels>",      &f_depth,     NULL,       "Max recurse level" },
-    { 'U', "usermap",   "[<from>:]<to>", &uidmap,      uidmap_add, "Add user mapping entry" },
     { 'G', "groupmap",  "[<from>:]<to>", &gidmap,      gidmap_add, "Add group mapping entry" },
+    { 'U', "usermap",   "[<from>:]<to>", &uidmap,      uidmap_add, "Add user mapping entry" },
     { 0,   NULL,        NULL,            NULL,         NULL,       NULL }
 };
 
@@ -1185,6 +1185,9 @@ usage(char *s,
     printf("Usage:\n  %s [<options>] <path> [.. <path-N>]\n\n", argv0);
     puts("Options:");
     argv_list_options(&options[0]);
+    printf("\nVersion:     %s\n", PACKAGE_VERSION);
+    printf("Author:      Peter Eriksson <%s>\n", PACKAGE_BUGREPORT);
+    printf("Website:     %s\n", PACKAGE_URL);
     exit(0);
 }
 
@@ -1200,7 +1203,7 @@ main(int argc,
     argv_parse_options(&i, argc, argv, options);
 
     if (f_verbose)
-	printf("[aclrepair, v%s - Copyright (c) 2023 Peter Eriksson <pen@lysator.liu.se>]\n",
+	printf("[aclrepair, v%s - Copyright (c) 2023-2025 Peter Eriksson <pen@lysator.liu.se>]\n",
 	       version);
     
     if (i >= argc) {

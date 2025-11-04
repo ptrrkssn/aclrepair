@@ -38,7 +38,7 @@
 #define PACKAGE_NAME "ACL Repair"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "ACL Repair 1.0"
+#define PACKAGE_STRING "ACL Repair 1.0.1"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "aclrepair"
@@ -47,7 +47,7 @@
 #define PACKAGE_URL "https://github.com/ptrrkssn/aclrepair"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.0"
+#define PACKAGE_VERSION "1.0.1"
 
 /* Define to 1 if all of the C90 standard headers exist (not just the ones
    required in a freestanding environment). This macro is provided for

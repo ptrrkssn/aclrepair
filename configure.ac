@@ -1,5 +1,5 @@
 AC_PREREQ([2.69])
-AC_INIT([ACL Repair], [1.0], [pen@lysator.liu.se], [aclrepair], [https://github.com/ptrrkssn/aclrepair])
+AC_INIT([ACL Repair], [1.0.1], [pen@lysator.liu.se], [aclrepair], [https://github.com/ptrrkssn/aclrepair])
 
 AC_CONFIG_SRCDIR([main.c])
 AC_CONFIG_HEADERS([config.h])
